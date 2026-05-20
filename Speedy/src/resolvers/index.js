@@ -128,6 +128,57 @@ function buildSubtaskDescription(areaLabel, storyTitle) {
 }
 
 /**
+ * Gibt die Issue-Typ-ID für den bevorzugten Namen zurück (Fallback auf ersten nicht-Epic-
+ * und nicht-Subtask-Typ). Notwendig, da in manchen Projekten "Story" nicht konfiguriert ist.
+ *
+ * @param {string} projectKey
+ * @param {string} preferred  - bevorzugter Typname, z. B. 'Story'
+ * @param {string} fallback   - Fallback-Typname, z. B. 'Task'
+ * @returns {Promise<{ id: string }|{ name: string }>}
+ */
+async function resolveIssueType(projectKey, preferred, fallback) {
+  const res = await api.asUser().requestJira(
+    route`/rest/api/3/project/${projectKey}`,
+    { headers: { Accept: 'application/json' } }
+  );
+  if (!res.ok) return { name: fallback };
+  const data  = await res.json();
+  const types = (data.issueTypes ?? []).filter(t => !t.subtask);
+  const find  = name => types.find(t => t.name.toLowerCase() === name.toLowerCase());
+  const match = find(preferred) ?? find(fallback) ?? types.find(t => t.name !== 'Epic');
+  return match ? { id: match.id } : { name: fallback };
+}
+
+/**
+ * Ermittelt den Subtask-Issue-Typ über das `subtask: true`-Flag.
+ * Primär: Projektebene. Fallback: globale Typliste.
+ *
+ * @param {string} projectKey
+ * @returns {Promise<{ id: string }|{ name: string }>}
+ */
+async function resolveSubtaskType(projectKey) {
+  const projectRes = await api.asUser().requestJira(
+    route`/rest/api/3/project/${projectKey}`,
+    { headers: { Accept: 'application/json' } }
+  );
+  if (projectRes.ok) {
+    const data = await projectRes.json();
+    const sub  = (data.issueTypes ?? []).find(t => t.subtask === true);
+    if (sub) return { id: sub.id };
+  }
+  const globalRes = await api.asUser().requestJira(
+    route`/rest/api/3/issuetype`,
+    { headers: { Accept: 'application/json' } }
+  );
+  if (globalRes.ok) {
+    const types = await globalRes.json();
+    const sub   = types.find(t => t.subtask === true);
+    if (sub) return { id: sub.id };
+  }
+  return { name: 'Subtask' };
+}
+
+/**
  * Legt eine Story (Kind-Issue des Epics) mit optionalen Sub-tasks an.
  *
  * @param {string}   req.payload.projectKey
@@ -141,13 +192,19 @@ resolver.define('createRequirement', async (req) => {
   const { projectKey, epicKey, storyTitle, storyDesc, areas } = req.payload;
   console.log('[Speedy] createRequirement:', projectKey, epicKey, storyTitle, areas.length, 'Bereiche');
 
+  const [storyType, subtaskType] = await Promise.all([
+    resolveIssueType(projectKey, 'Story', 'Task'),
+    resolveSubtaskType(projectKey),
+  ]);
+  console.log('[Speedy] Issue-Typen:', JSON.stringify(storyType), JSON.stringify(subtaskType));
+
   const storyRes  = await api.asUser().requestJira(route`/rest/api/3/issue`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body:    JSON.stringify({ fields: {
       project:     { key: projectKey },
       summary:     storyTitle,
-      issuetype:   { name: 'Story' },
+      issuetype:   storyType,
       parent:      { key: epicKey },
       description: buildPlainTextADF(storyDesc),
     }}),
@@ -168,7 +225,7 @@ resolver.define('createRequirement', async (req) => {
       body:    JSON.stringify({ fields: {
         project:     { key: projectKey },
         summary:     area.title,
-        issuetype:   { name: 'Sub-task' },
+        issuetype:   subtaskType,
         parent:      { key: storyData.key },
         description: buildSubtaskDescription(area.label, storyTitle),
       }}),

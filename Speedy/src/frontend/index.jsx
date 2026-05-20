@@ -289,10 +289,11 @@ const AnforderungTab = () => {
   const context    = useProductContext();
   const projectKey = context?.extension?.project?.key ?? null;
 
-  const [epics,        setEpics]        = useState([]);
-  const [epicsLoading, setEpicsLoading] = useState(false);
-  const [epicsErr,     setEpicsErr]     = useState('');
-  const [selectedEpic, setSelectedEpic] = useState(null);
+  const [epics,          setEpics]          = useState([]);
+  const [epicsLoading,   setEpicsLoading]   = useState(false);
+  const [epicsErr,       setEpicsErr]       = useState('');
+  const [epicsRefresh,   setEpicsRefresh]   = useState(0);
+  const [selectedEpic,   setSelectedEpic]   = useState(null);
   const [storyTitle,   setStoryTitle]   = useState('');
   const [storyDesc,    setStoryDesc]    = useState('');
   const [areas,        setAreas]        = useState(initAreas);
@@ -303,6 +304,7 @@ const AnforderungTab = () => {
   useEffect(() => {
     if (!projectKey) return;
     setEpicsLoading(true);
+    setEpicsErr('');
     requestJira('/rest/api/3/search/jql', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -316,7 +318,7 @@ const AnforderungTab = () => {
       .then(data => setEpics((data.issues ?? []).map(i => ({ key: i.key, summary: i.fields.summary }))))
       .catch(err => setEpicsErr(err?.message ?? String(err)))
       .finally(() => setEpicsLoading(false));
-  }, [projectKey]);
+  }, [projectKey, epicsRefresh]);
 
   const handleAreaToggle = (key, checked) => {
     const b = BEREICHE.find(x => x.key === key);
@@ -385,6 +387,13 @@ const AnforderungTab = () => {
           <Stack space="space.200">
             <Inline space="space.200" alignBlock="center">
               <Heading size="small">Epic auswählen</Heading>
+              <Button
+                appearance="subtle"
+                onClick={() => setEpicsRefresh(v => v + 1)}
+                isDisabled={epicsLoading}
+              >
+                Aktualisieren
+              </Button>
               {epicsLoading && <Spinner size="small" label="Lade Epics…" />}
             </Inline>
             {epicsErr
@@ -421,7 +430,6 @@ const AnforderungTab = () => {
                 value={storyDesc}
                 onChange={e => setStoryDesc(e.target.value)}
                 placeholder="Ausführliche Beschreibung, Akzeptanzkriterien, Hintergrund…"
-                resize="vertical"
               />
             </Stack>
           </Stack>
@@ -474,18 +482,20 @@ const AnforderungTab = () => {
         {createError && <ErrorView message={createError} />}
 
         {result && (
-          <Box backgroundColor="color.background.accent.green.subtlest" padding="space.300" xcss={roundedXcss}>
-            <Stack space="space.150">
-              <SectionMessage appearance="success" title="Erfolgreich angelegt">
-                <Stack space="space.075">
-                  <Text>Story angelegt: {result.storyKey}</Text>
-                  {result.subtasks.map(t => (
-                    <Text key={t.key}>Sub-task {t.key} ({t.label}) angelegt.</Text>
-                  ))}
-                </Stack>
-              </SectionMessage>
+          <SectionMessage appearance="success" title="Erfolgreich angelegt">
+            <Stack space="space.100">
+              <Inline space="space.100" alignBlock="center">
+                <Text>Story:</Text>
+                <Link href={result.storyUrl} openNewWindow>{result.storyKey}</Link>
+              </Inline>
+              {result.subtasks.map(t => (
+                <Inline key={t.key} space="space.100" alignBlock="center">
+                  <Text>Sub-task {t.label}:</Text>
+                  <Link href={t.url} openNewWindow>{t.key}</Link>
+                </Inline>
+              ))}
             </Stack>
-          </Box>
+          </SectionMessage>
         )}
 
         <Inline space="space.100" alignInline="end">
