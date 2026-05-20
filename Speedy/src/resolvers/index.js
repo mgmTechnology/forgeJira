@@ -70,6 +70,128 @@ resolver.define('getCurrentUser', async (req) => {
 });
 
 /**
+ * Konvertiert Plain-Text (mit Zeilenumbrüchen) in ein ADF-Dokument.
+ *
+ * @param {string} text
+ * @returns {object|undefined}
+ */
+function buildPlainTextADF(text) {
+  if (!text) return undefined;
+  const blocks = text.split(/\n\n+/);
+  return {
+    type: 'doc', version: 1,
+    content: blocks.map(block => {
+      const lines = block.split('\n');
+      const inline = [];
+      lines.forEach((line, i) => {
+        inline.push({ type: 'text', text: line });
+        if (i < lines.length - 1) inline.push({ type: 'hardBreak' });
+      });
+      return { type: 'paragraph', content: inline };
+    }),
+  };
+}
+
+/**
+ * ADF-Beschreibung für eine Sub-task, die Eigenständigkeit und Unabhängigkeit betont.
+ *
+ * @param {string} areaLabel  - z. B. "VBON"
+ * @param {string} storyTitle - Titel der übergeordneten Story
+ * @returns {object}
+ */
+function buildSubtaskDescription(areaLabel, storyTitle) {
+  const item = text => ({
+    type: 'listItem',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  });
+  return {
+    type: 'doc', version: 1,
+    content: [
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text: `Bereich: ${areaLabel}  |  Story: „${storyTitle}"`, marks: [{ type: 'strong' }] }],
+      },
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text: 'Diese Sub-task ist Teil einer aufgeteilten Story und wird eigenständig bearbeitet:' }],
+      },
+      {
+        type: 'bulletList',
+        content: [
+          item('Kann unabhängig und zeitversetzt von den anderen Sub-tasks bearbeitet werden.'),
+          item('Wird typischerweise von einer anderen Person bearbeitet als die übrigen Sub-tasks.'),
+          item('Besitzt einen eigenen, unabhängigen Status.'),
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Legt eine Story (Kind-Issue des Epics) mit optionalen Sub-tasks an.
+ *
+ * @param {string}   req.payload.projectKey
+ * @param {string}   req.payload.epicKey
+ * @param {string}   req.payload.storyTitle
+ * @param {string}   req.payload.storyDesc
+ * @param {{ key, label, title }[]} req.payload.areas
+ * @returns {{ storyKey, storyUrl, subtasks: { key, label, title, url }[] }}
+ */
+resolver.define('createRequirement', async (req) => {
+  const { projectKey, epicKey, storyTitle, storyDesc, areas } = req.payload;
+  console.log('[Speedy] createRequirement:', projectKey, epicKey, storyTitle, areas.length, 'Bereiche');
+
+  const storyRes  = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body:    JSON.stringify({ fields: {
+      project:     { key: projectKey },
+      summary:     storyTitle,
+      issuetype:   { name: 'Story' },
+      parent:      { key: epicKey },
+      description: buildPlainTextADF(storyDesc),
+    }}),
+  });
+  const storyData = await storyRes.json();
+  if (!storyRes.ok) {
+    const msg = storyData.errors ? Object.values(storyData.errors).join(', ') : String(storyRes.status);
+    console.error('[Speedy] Story-Fehler:', msg);
+    throw new Error(`Story: ${msg}`);
+  }
+  console.log('[Speedy] Story angelegt:', storyData.key);
+
+  const createdSubtasks = [];
+  for (const area of areas) {
+    const subRes  = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body:    JSON.stringify({ fields: {
+        project:     { key: projectKey },
+        summary:     area.title,
+        issuetype:   { name: 'Sub-task' },
+        parent:      { key: storyData.key },
+        description: buildSubtaskDescription(area.label, storyTitle),
+      }}),
+    });
+    const subData = await subRes.json();
+    if (!subRes.ok) {
+      const msg = subData.errors ? Object.values(subData.errors).join(', ') : String(subRes.status);
+      console.error('[Speedy] Sub-task-Fehler:', area.label, msg);
+      throw new Error(`Sub-task "${area.label}": ${msg}`);
+    }
+    console.log('[Speedy] Sub-task angelegt:', subData.key, area.label);
+    createdSubtasks.push({ key: subData.key, label: area.label, title: area.title });
+  }
+
+  const siteBase = req.context.localBaseUrl;
+  return {
+    storyKey: storyData.key,
+    storyUrl: `${siteBase}/browse/${storyData.key}`,
+    subtasks: createdSubtasks.map(t => ({ ...t, url: `${siteBase}/browse/${t.key}` })),
+  };
+});
+
+/**
  * Erzeugt eine Atlassian Document Format (ADF) Beschreibung für das Epic.
  * Enthält die Urlaubssperr-Zeiträume aus der Planungswarnung.
  *

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import ForgeReconciler, {
   Text, Heading, DynamicTable,
   Tabs, Tab, TabList, TabPanel,
-  Select, TextArea, Textfield,
+  Select, TextArea, Textfield, Toggle,
   Stack, Inline, Box,
   Badge, Lozenge, Tag, TagGroup,
   User, SectionMessage,
@@ -265,75 +265,248 @@ const ProjectTab = () => {
   );
 };
 
-// ─── Tab 3: Anforderung ──────────────────────────────────────────────────────
+// ─── Tab 4: Anforderung ──────────────────────────────────────────────────────
 
-/**
- * Formular zum Erfassen einer neuen Anforderung.
- * Speichern-Logik ist als Platzhalter vorbereitet.
- *
- * @returns {JSX.Element}
- */
+const BEREICHE = [
+  { key: 'VBON', label: 'VBON',        suffix: 'VBON' },
+  { key: 'DOL',  label: 'DOL',         suffix: 'DOL'  },
+  { key: 'WS',   label: 'Webservices', suffix: 'WS'   },
+];
+
+const initAreas = () => ({
+  VBON: { checked: false, title: '' },
+  DOL:  { checked: false, title: '' },
+  WS:   { checked: false, title: '' },
+});
+
+const bereichAccent = {
+  VBON: 'color.background.accent.blue.subtlest',
+  DOL:  'color.background.accent.teal.subtlest',
+  WS:   'color.background.accent.purple.subtlest',
+};
+
 const AnforderungTab = () => {
-  const [titel, setTitel] = useState('');
-  const [text, setText]   = useState('');
-  const [saved, setSaved] = useState(false);
+  const context    = useProductContext();
+  const projectKey = context?.extension?.project?.key ?? null;
 
-  const handleSave = () => {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+  const [epics,        setEpics]        = useState([]);
+  const [epicsLoading, setEpicsLoading] = useState(false);
+  const [epicsErr,     setEpicsErr]     = useState('');
+  const [selectedEpic, setSelectedEpic] = useState(null);
+  const [storyTitle,   setStoryTitle]   = useState('');
+  const [storyDesc,    setStoryDesc]    = useState('');
+  const [areas,        setAreas]        = useState(initAreas);
+  const [creating,     setCreating]     = useState(false);
+  const [result,       setResult]       = useState(null);
+  const [createError,  setCreateError]  = useState('');
+
+  useEffect(() => {
+    if (!projectKey) return;
+    setEpicsLoading(true);
+    requestJira('/rest/api/3/search/jql', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body:    JSON.stringify({
+        jql:        `project = "${projectKey}" AND issuetype = Epic ORDER BY created DESC`,
+        fields:     ['summary'],
+        maxResults: 50,
+      }),
+    })
+      .then(res => res.json())
+      .then(data => setEpics((data.issues ?? []).map(i => ({ key: i.key, summary: i.fields.summary }))))
+      .catch(err => setEpicsErr(err?.message ?? String(err)))
+      .finally(() => setEpicsLoading(false));
+  }, [projectKey]);
+
+  const handleAreaToggle = (key, checked) => {
+    const b = BEREICHE.find(x => x.key === key);
+    setAreas(prev => ({
+      ...prev,
+      [key]: {
+        checked,
+        title: checked && !prev[key].title
+          ? (storyTitle.trim() ? `${storyTitle.trim()} [${b.suffix}]` : `[${b.suffix}]`)
+          : prev[key].title,
+      },
+    }));
   };
+
+  const handleCreate = async () => {
+    setCreating(true);
+    setCreateError('');
+    setResult(null);
+    try {
+      const checkedAreas = BEREICHE
+        .filter(b => areas[b.key].checked)
+        .map(b => ({ key: b.key, label: b.label, title: areas[b.key].title.trim() }));
+      const res = await invoke('createRequirement', {
+        projectKey,
+        epicKey:    selectedEpic.value,
+        storyTitle: storyTitle.trim(),
+        storyDesc:  storyDesc.trim(),
+        areas:      checkedAreas,
+      });
+      setResult(res);
+    } catch (err) {
+      setCreateError(err?.message ?? String(err));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleReset = () => {
+    setResult(null);
+    setCreateError('');
+    setStoryTitle('');
+    setStoryDesc('');
+    setSelectedEpic(null);
+    setAreas(initAreas());
+  };
+
+  const checkedAreas   = BEREICHE.filter(b => areas[b.key].checked);
+  const allTitlesValid = checkedAreas.every(b => areas[b.key].title.trim());
+  const canCreate      = !!selectedEpic && !!storyTitle.trim() && !!projectKey && allTitlesValid;
+
+  if (!projectKey) {
+    return (
+      <Box padding="space.200">
+        <SectionMessage appearance="warning" title="Kein Projektkontext">
+          <Text>Bitte öffne die App über eine Jira-Projektseite.</Text>
+        </SectionMessage>
+      </Box>
+    );
+  }
 
   return (
     <Box padding="space.200">
-      <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
-        <Stack space="space.300">
+      <Stack space="space.300">
 
-          <Stack space="space.050">
-            <Heading size="medium">Neue Anforderung</Heading>
-            <Text>Erfasse hier eine Anforderung für das Projekt.</Text>
+        <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
+          <Stack space="space.200">
+            <Inline space="space.200" alignBlock="center">
+              <Heading size="small">Epic auswählen</Heading>
+              {epicsLoading && <Spinner size="small" label="Lade Epics…" />}
+            </Inline>
+            {epicsErr
+              ? <ErrorView message={epicsErr} />
+              : <Select
+                  placeholder={epicsLoading ? 'Lade Epics…' : 'Epic wählen…'}
+                  options={epics.map(e => ({ label: `${e.key} – ${e.summary}`, value: e.key }))}
+                  value={selectedEpic}
+                  onChange={opt => setSelectedEpic(opt)}
+                />
+            }
+            {!epicsLoading && !epicsErr && epics.length === 0 && (
+              <Text>Keine Epics im Projekt gefunden.</Text>
+            )}
           </Stack>
+        </Box>
 
-          <Stack space="space.100">
-            <Label labelFor="req-titel">Titel *</Label>
-            <Textfield
-              id="req-titel"
-              value={titel}
-              onChange={e => setTitel(e.target.value)}
-              placeholder="Kurze, prägnante Bezeichnung…"
-            />
+        <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
+          <Stack space="space.250">
+            <Heading size="small">Story (Anforderung)</Heading>
+            <Stack space="space.100">
+              <Label labelFor="story-title">Titel *</Label>
+              <Textfield
+                id="story-title"
+                value={storyTitle}
+                onChange={e => setStoryTitle(e.target.value)}
+                placeholder="Kurze, prägnante Bezeichnung der Anforderung…"
+              />
+            </Stack>
+            <Stack space="space.100">
+              <Label labelFor="story-desc">Beschreibung</Label>
+              <TextArea
+                id="story-desc"
+                value={storyDesc}
+                onChange={e => setStoryDesc(e.target.value)}
+                placeholder="Ausführliche Beschreibung, Akzeptanzkriterien, Hintergrund…"
+                resize="vertical"
+              />
+            </Stack>
           </Stack>
+        </Box>
 
-          <Stack space="space.100">
-            <Label labelFor="req-text">Beschreibung</Label>
-            <TextArea
-              id="req-text"
-              value={text}
-              onChange={e => setText(e.target.value)}
-              placeholder="Detaillierte Beschreibung, Akzeptanzkriterien, Abhängigkeiten…"
-              resize="vertical"
-            />
+        <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
+          <Stack space="space.250">
+            <Stack space="space.050">
+              <Heading size="small">Betroffene Bereiche</Heading>
+              <Text>Pro aktiviertem Bereich wird eine eigenständige Sub-task angelegt – separate Bearbeitung, eigener Status.</Text>
+            </Stack>
+            <Stack space="space.200">
+              {BEREICHE.map(b => (
+                <Stack key={b.key} space="space.075">
+                  <Inline space="space.150" alignBlock="center">
+                    <Toggle
+                      id={`toggle-${b.key}`}
+                      isChecked={areas[b.key].checked}
+                      onChange={e => handleAreaToggle(b.key, e.target.checked)}
+                      label={b.label}
+                    />
+                    <Text>{b.label}</Text>
+                  </Inline>
+                  {areas[b.key].checked && (
+                    <Box
+                      backgroundColor={bereichAccent[b.key]}
+                      padding="space.200"
+                      xcss={roundedXcss}
+                    >
+                      <Stack space="space.075">
+                        <Label labelFor={`area-${b.key}`}>Titel Sub-task {b.label} *</Label>
+                        <Textfield
+                          id={`area-${b.key}`}
+                          value={areas[b.key].title}
+                          onChange={e => setAreas(prev => ({
+                            ...prev,
+                            [b.key]: { ...prev[b.key], title: e.target.value },
+                          }))}
+                          placeholder={`Titel der Sub-task für ${b.label}…`}
+                        />
+                      </Stack>
+                    </Box>
+                  )}
+                </Stack>
+              ))}
+            </Stack>
           </Stack>
+        </Box>
 
-          {saved && (
-            <SectionMessage appearance="success" title="Gespeichert">
-              <Text>Die Anforderung wurde erfolgreich gespeichert.</Text>
-            </SectionMessage>
-          )}
+        {createError && <ErrorView message={createError} />}
 
-          <Inline space="space.100" alignInline="end">
-            <Button appearance="subtle" onClick={() => { setTitel(''); setText(''); setSaved(false); }}>
-              Zurücksetzen
-            </Button>
-            <Button appearance="primary" onClick={handleSave} isDisabled={!titel.trim()}>
-              Speichern
-            </Button>
-          </Inline>
+        {result && (
+          <Box backgroundColor="color.background.accent.green.subtlest" padding="space.300" xcss={roundedXcss}>
+            <Stack space="space.150">
+              <SectionMessage appearance="success" title="Erfolgreich angelegt">
+                <Stack space="space.075">
+                  <Text>Story angelegt: {result.storyKey}</Text>
+                  {result.subtasks.map(t => (
+                    <Text key={t.key}>Sub-task {t.key} ({t.label}) angelegt.</Text>
+                  ))}
+                </Stack>
+              </SectionMessage>
+            </Stack>
+          </Box>
+        )}
 
-        </Stack>
-      </Box>
+        <Inline space="space.100" alignInline="end">
+          <Button appearance="subtle" onClick={handleReset}>
+            Zurücksetzen
+          </Button>
+          <Button
+            appearance="primary"
+            onClick={handleCreate}
+            isDisabled={!canCreate || creating}
+          >
+            {creating ? 'Wird angelegt…' : 'Anforderung anlegen'}
+          </Button>
+          {creating && <Spinner size="medium" label="Bitte warten…" />}
+        </Inline>
+
+      </Stack>
     </Box>
   );
 };
+
 
 // ─── Tab 4: Release – Hilfsfunktionen ────────────────────────────────────────
 
@@ -929,11 +1102,11 @@ const ReleaseTab = () => {
                           onChange={opt => updateRule(idx, 'adjustStr', opt?.value ?? 'any')}
                         />
                       )},
-                      { key: 'del', content: (
+                      { key: 'del', content: rule.userAdded ? (
                         <Button appearance="subtle" onClick={() => handleDeleteMilestone(idx)}>
                           Entfernen
                         </Button>
-                      )},
+                      ) : <Text> </Text> },
                     ],
                   };
                 })
@@ -973,7 +1146,12 @@ const ReleaseTab = () => {
         </Box>
 
         {/* Ergebnisse */}
-        {plan && (
+        {plan && !liveEntry && (
+          <SectionMessage appearance="warning" title="Go-Live-Meilenstein fehlt">
+            <Text>Der Meilenstein "Go-Live" wurde aus dem Regelwerk entfernt. Klicke auf "Standardwerte", um ihn wiederherzustellen.</Text>
+          </SectionMessage>
+        )}
+        {plan && liveEntry && (
           <Stack space="space.300">
 
             {/* Go-Live Header */}
@@ -1029,13 +1207,15 @@ const ReleaseTab = () => {
             </Box>
 
             {/* Urlaubssperren */}
-            <SectionMessage appearance="warning" title="Keine Urlaubsplanung in kritischen Phasen">
-              <Stack space="space.100">
-                <Text>Beta-Woche: {formatDate(betaWeek.start)} – {formatDate(betaWeek.end)}</Text>
-                <Text>Finalisierungs-Woche: {formatDate(finWeek.start)} – {formatDate(finWeek.end)}</Text>
-                <Text>Tag des Go-Live: {formatDate(liveEntry.date)}</Text>
-              </Stack>
-            </SectionMessage>
+            {betaWeek && finWeek && (
+              <SectionMessage appearance="warning" title="Keine Urlaubsplanung in kritischen Phasen">
+                <Stack space="space.100">
+                  <Text>Beta-Woche: {formatDate(betaWeek.start)} – {formatDate(betaWeek.end)}</Text>
+                  <Text>Finalisierungs-Woche: {formatDate(finWeek.start)} – {formatDate(finWeek.end)}</Text>
+                  <Text>Tag des Go-Live: {formatDate(liveEntry.date)}</Text>
+                </Stack>
+              </SectionMessage>
+            )}
 
             {/* Jira-Export */}
             <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
@@ -1159,13 +1339,13 @@ const App = () => (
     <TabList>
       <Tab>Benutzer</Tab>
       <Tab>Projekt</Tab>
-      <Tab>Anforderung</Tab>
       <Tab>Release</Tab>
+      <Tab>Anforderung</Tab>
     </TabList>
     <TabPanel><UserTab /></TabPanel>
     <TabPanel><ProjectTab /></TabPanel>
-    <TabPanel><AnforderungTab /></TabPanel>
     <TabPanel><ReleaseTab /></TabPanel>
+    <TabPanel><AnforderungTab /></TabPanel>
   </Tabs>
 );
 
