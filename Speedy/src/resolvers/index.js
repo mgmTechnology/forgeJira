@@ -227,7 +227,9 @@ resolver.define('createRequirement', async (req) => {
         summary:     area.title,
         issuetype:   subtaskType,
         parent:      { key: storyData.key },
-        description: buildSubtaskDescription(area.label, storyTitle),
+        description: area.desc
+          ? buildPlainTextADF(area.desc)
+          : buildSubtaskDescription(area.label, storyTitle),
       }}),
     });
     const subData = await subRes.json();
@@ -240,7 +242,7 @@ resolver.define('createRequirement', async (req) => {
     createdSubtasks.push({ key: subData.key, label: area.label, title: area.title });
   }
 
-  const siteBase = req.context.localBaseUrl;
+  const siteBase = new URL(req.context.localBaseUrl).origin;
   return {
     storyKey: storyData.key,
     storyUrl: `${siteBase}/browse/${storyData.key}`,
@@ -398,7 +400,7 @@ resolver.define('createReleasePlan', async (req) => {
 
   // localBaseUrl ist die echte Jira-Instanz-URL aus dem Forge-Kontext.
   // taskData.self zeigt auf den API-Gateway (api.atlassian.com) und ist nicht browserkompatibel.
-  const siteBase = req.context.localBaseUrl;
+  const siteBase = new URL(req.context.localBaseUrl).origin;
   const result   = {
     epicKey: epicData.key,
     epicUrl: `${siteBase}/browse/${epicData.key}`,

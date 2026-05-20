@@ -10,7 +10,7 @@ import ForgeReconciler, {
   DatePicker, LineChart,
   useProductContext, xcss,
 } from '@forge/react';
-import { requestJira, invoke } from "@forge/bridge";
+import { requestJira, invoke, rovo } from "@forge/bridge";
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
@@ -274,9 +274,9 @@ const BEREICHE = [
 ];
 
 const initAreas = () => ({
-  VBON: { checked: false, title: '' },
-  DOL:  { checked: false, title: '' },
-  WS:   { checked: false, title: '' },
+  VBON: { checked: false, title: '', desc: '' },
+  DOL:  { checked: false, title: '', desc: '' },
+  WS:   { checked: false, title: '', desc: '' },
 });
 
 const bereichAccent = {
@@ -300,6 +300,11 @@ const AnforderungTab = () => {
   const [creating,     setCreating]     = useState(false);
   const [result,       setResult]       = useState(null);
   const [createError,  setCreateError]  = useState('');
+  const [rovoEnabled,  setRovoEnabled]  = useState(false);
+
+  useEffect(() => {
+    rovo.isEnabled().then(setRovoEnabled).catch(() => setRovoEnabled(false));
+  }, []);
 
   useEffect(() => {
     if (!projectKey) return;
@@ -325,6 +330,7 @@ const AnforderungTab = () => {
     setAreas(prev => ({
       ...prev,
       [key]: {
+        ...prev[key],
         checked,
         title: checked && !prev[key].title
           ? (storyTitle.trim() ? `${storyTitle.trim()} [${b.suffix}]` : `[${b.suffix}]`)
@@ -340,7 +346,7 @@ const AnforderungTab = () => {
     try {
       const checkedAreas = BEREICHE
         .filter(b => areas[b.key].checked)
-        .map(b => ({ key: b.key, label: b.label, title: areas[b.key].title.trim() }));
+        .map(b => ({ key: b.key, label: b.label, title: areas[b.key].title.trim(), desc: areas[b.key].desc.trim() }));
       const res = await invoke('createRequirement', {
         projectKey,
         epicKey:    selectedEpic.value,
@@ -424,12 +430,31 @@ const AnforderungTab = () => {
               />
             </Stack>
             <Stack space="space.100">
-              <Label labelFor="story-desc">Beschreibung</Label>
+              <Inline space="space.200" alignBlock="center">
+                <Text>Beschreibung</Text>
+                <Button
+                  appearance="subtle"
+                  isDisabled={!rovoEnabled}
+                  onClick={() => {
+                    try {
+                      rovo.open({
+                        agentKey:  'story-structurer',
+                        agentName: 'Story Strukturierer',
+                        prompt: storyDesc.trim()
+                          ? `Strukturiere folgende Story-Beschreibung für Jira:\n\n${storyDesc.trim()}`
+                          : 'Ich möchte eine neue Jira-Story schreiben. Führe mich durch die wichtigsten Punkte.',
+                      });
+                    } catch { /* ignore */ }
+                  }}
+                >
+                  {rovoEnabled ? 'Mit Rovo strukturieren' : 'Rovo nicht verfügbar'}
+                </Button>
+              </Inline>
               <TextArea
                 id="story-desc"
                 value={storyDesc}
                 onChange={e => setStoryDesc(e.target.value)}
-                placeholder="Ausführliche Beschreibung, Akzeptanzkriterien, Hintergrund…"
+                placeholder="Stichpunkte, Rohentwurf oder unstrukturierten Text eingeben – Rovo hilft beim Strukturieren…"
               />
             </Stack>
           </Stack>
@@ -459,17 +484,50 @@ const AnforderungTab = () => {
                       padding="space.200"
                       xcss={roundedXcss}
                     >
-                      <Stack space="space.075">
-                        <Label labelFor={`area-${b.key}`}>Titel Sub-task {b.label} *</Label>
-                        <Textfield
-                          id={`area-${b.key}`}
-                          value={areas[b.key].title}
-                          onChange={e => setAreas(prev => ({
-                            ...prev,
-                            [b.key]: { ...prev[b.key], title: e.target.value },
-                          }))}
-                          placeholder={`Titel der Sub-task für ${b.label}…`}
-                        />
+                      <Stack space="space.150">
+                        <Stack space="space.075">
+                          <Label labelFor={`area-${b.key}`}>Titel Sub-task {b.label} *</Label>
+                          <Textfield
+                            id={`area-${b.key}`}
+                            value={areas[b.key].title}
+                            onChange={e => setAreas(prev => ({
+                              ...prev,
+                              [b.key]: { ...prev[b.key], title: e.target.value },
+                            }))}
+                            placeholder={`Titel der Sub-task für ${b.label}…`}
+                          />
+                        </Stack>
+                        <Stack space="space.075">
+                          <Inline space="space.200" alignBlock="center">
+                            <Text>Beschreibung Sub-task {b.label}</Text>
+                              <Button
+                                appearance="subtle"
+                                isDisabled={!rovoEnabled}
+                                onClick={() => {
+                                  try {
+                                    rovo.open({
+                                      agentKey:  'story-structurer',
+                                      agentName: 'Story Strukturierer',
+                                      prompt: areas[b.key].desc.trim()
+                                        ? `Strukturiere folgende Beschreibung für die Sub-task "${areas[b.key].title || b.label}" (Bereich ${b.label}) als Jira-Story:\n\n${areas[b.key].desc.trim()}`
+                                        : `Ich möchte eine Sub-task für den Bereich ${b.label} beschreiben. Führe mich durch die wichtigsten Punkte.`,
+                                    });
+                                  } catch { /* ignore */ }
+                                }}
+                              >
+                                {rovoEnabled ? 'Mit Rovo strukturieren' : 'Rovo nicht verfügbar'}
+                              </Button>
+                          </Inline>
+                          <TextArea
+                            id={`area-desc-${b.key}`}
+                            value={areas[b.key].desc}
+                            onChange={e => setAreas(prev => ({
+                              ...prev,
+                              [b.key]: { ...prev[b.key], desc: e.target.value },
+                            }))}
+                            placeholder={`Beschreibung oder Stichpunkte für ${b.label}…`}
+                          />
+                        </Stack>
                       </Stack>
                     </Box>
                   )}
