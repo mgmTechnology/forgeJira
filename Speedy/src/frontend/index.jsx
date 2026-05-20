@@ -85,8 +85,8 @@ const UserTab = () => {
 
   useEffect(() => {
     invoke('getCurrentUser')
-      .then(setUser)
-      .catch(err => setError(err.message));
+      .then(data => data ? setUser(data) : setError('Keine Benutzerdaten erhalten.'))
+      .catch(err => setError(err?.message ?? String(err)));
   }, []);
 
   if (error) return <ErrorView message={error} />;
@@ -163,7 +163,7 @@ const ProjectTab = () => {
       requestJira('/rest/api/3/project/search', { headers: { 'Accept': 'application/json' } })
         .then(res => res.json())
         .then(data => setAllProjects(data.values || []))
-        .catch(err => setError(err.message));
+        .catch(err => setError(err?.message ?? String(err)));
     }
   }, [context]);
 
@@ -176,7 +176,7 @@ const ProjectTab = () => {
         return res.json();
       })
       .then(setProject)
-      .catch(err => setError(err.message));
+      .catch(err => setError(err?.message ?? String(err)));
   }, [selectedKey]);
 
   if (error) return <ErrorView message={error} />;
@@ -423,6 +423,7 @@ function isWorkday(date) {
  * @returns {Date}
  */
 function subtractWorkdays(date, n) {
+  if (!(date instanceof Date) || isNaN(date.getTime())) return new Date(NaN);
   let d = new Date(date);
   let remaining = n;
   while (remaining > 0) {
@@ -529,7 +530,7 @@ const RULE_DOCS = {
   'Finalisierung (Beginn)':         'Start der Finalisierungsphase – letzte Überprüfungen vor Go-Live',
   'Freigabe an IT':                 'Formelle Softwarefreigabe an IT-Betrieb (selber Tag wie Finalisierung)',
   'Vorbereitung Finalisierung':     'Abschluss aller Entwicklungsarbeiten vor der Finalisierungsphase',
-  'Liveschaltung':                  'Deployment auf Produktion – ausschließlich Mittwoch oder Donnerstag',
+  'Go-Live':                  'Deployment auf Produktion – ausschließlich Mittwoch oder Donnerstag',
 };
 
 const WEEKDAY_OPTIONS = [
@@ -539,6 +540,13 @@ const WEEKDAY_OPTIONS = [
   { label: 'Mi', value: '3' },
   { label: 'Do', value: '4' },
   { label: 'Fr', value: '5' },
+];
+
+const PHASE_OPTIONS = [
+  { label: 'Planung',       value: 'Planung' },
+  { label: 'Entwicklung',   value: 'Entwicklung' },
+  { label: 'Beta & Tests',  value: 'Beta & Tests' },
+  { label: 'Release-Woche', value: 'Release-Woche' },
 ];
 
 /**
@@ -565,7 +573,7 @@ const MILESTONES = [
   { name: 'Finalisierung (Beginn)',         phase: 'Release-Woche', offset:  -8, adjust: 2 },
   { name: 'Freigabe an IT',                 phase: 'Release-Woche', offset:  -8, adjust: 2 },
   { name: 'Vorbereitung Finalisierung',     phase: 'Entwicklung',   dependsOn: 'Finalisierung (Beginn)', workdaysBefore: 3 },
-  { name: 'Liveschaltung',                  phase: 'Release-Woche', offset:   0 },
+  { name: 'Go-Live',                  phase: 'Release-Woche', offset:   0 },
 ];
 
 const PHASE_APPEARANCE = {
@@ -592,7 +600,7 @@ const BLOCKING_DEPS = [
   { blocker: 'Technische Änderungsdoku',   blocked: 'Beta-Version' },
   { blocker: 'Vorbereitung Finalisierung', blocked: 'Finalisierung (Beginn)' },
   { blocker: 'Test-/Abnahmephase fertig',  blocked: 'Finalisierung (Beginn)' },
-  { blocker: 'Finalisierung (Beginn)',      blocked: 'Liveschaltung' },
+  { blocker: 'Finalisierung (Beginn)',      blocked: 'Go-Live' },
 ];
 
 
@@ -642,6 +650,7 @@ function calculatePlan(live, rules) {
 
   return rules
     .map(m => ({ name: m.name, phase: m.phase, date: dates.get(m.name) }))
+    .filter(m => m.date instanceof Date && !isNaN(m.date.getTime()))
     .sort((a, b) => a.date - b.date);
 }
 
@@ -673,11 +682,23 @@ const ReleaseTab = () => {
   const updateRule = (idx, field, value) =>
     setRules(prev => prev.map((r, i) => i === idx ? { ...r, [field]: value } : r));
 
+  const handleAddMilestone = () =>
+    setRules(prev => [...prev, {
+      _id: Date.now(),
+      name: '', phase: 'Planung', description: '',
+      offsetInput: '-7', workdaysInput: '-1',
+      adjustStr: 'any', dependsOn: undefined,
+      userAdded: true,
+    }]);
+
+  const handleDeleteMilestone = (idx) =>
+    setRules(prev => prev.filter((_, i) => i !== idx));
+
   const handleCalculate = () => {
     if (!liveIso) { setError('Bitte ein Datum wählen.'); return; }
     const live = parseLocalDate(liveIso);
     if (live.getDay() !== 3 && live.getDay() !== 4) {
-      setError('Regelverstoß: Liveschaltung muss Mittwoch (Mi) oder Donnerstag (Do) sein.');
+      setError('Regelverstoß: Go-Live muss Mittwoch (Mi) oder Donnerstag (Do) sein.');
       setPlan(null);
       return;
     }
@@ -746,7 +767,7 @@ const ReleaseTab = () => {
     }
   };
 
-  const liveEntry = plan?.find(m => m.name === 'Liveschaltung');
+  const liveEntry = plan?.find(m => m.name === 'Go-Live');
   const betaEntry = plan?.find(m => m.name === 'Beta-Version');
   const finEntry  = plan?.find(m => m.name === 'Finalisierung (Beginn)');
   const betaWeek  = betaEntry ? getWeekRange(betaEntry.date) : null;
@@ -788,7 +809,7 @@ const ReleaseTab = () => {
           {showRules && (
             <Box padding="space.200">
               <Stack space="space.075">
-                <Text>Liveschaltung ausschließlich Mittwoch oder Donnerstag (kein Freitags-Deployment).</Text>
+                <Text>Go-Live ausschließlich Mittwoch oder Donnerstag (kein Freitags-Deployment).</Text>
                 <Text>NRW-Feiertage werden bei Arbeitstags-Berechnungen automatisch übersprungen. Grundlage: Bundesrecht, NRW-Landesrecht (SchFG NW) sowie die Gaußsche Osterformel für bewegliche Feste.</Text>
                 <Text>Tage (Offset): negative Zahl = Kalendertage VOR dem Go-Live. 0 = Go-Live-Tag selbst.</Text>
                 <Text>Werktage: negative Zahl = Arbeitstage (Mo–Fr, ohne NRW-Feiertage) VOR dem jeweiligen Bezugstermin (z. B. -1 vor Beta-Version, -3 vor Finalisierung) – nicht vor dem Go-Live.</Text>
@@ -821,44 +842,106 @@ const ReleaseTab = () => {
             )}
             <DynamicTable
               head={{ cells: [
-                { key: 'ms',   content: 'Meilenstein',            width: 20 },
-                { key: 'desc', content: 'Bedeutung',              width: 30 },
-                { key: 'abs',  content: 'Wert',                   width: 26 },
-                { key: 'wt',   content: 'Wochentag',              width: 24 },
+                { key: 'ms',     content: 'Meilenstein',  width: 17 },
+                { key: 'desc',   content: 'Bedeutung',    width: 20 },
+                { key: 'abs',    content: 'Tage',         width: 9  },
+                { key: 'before', content: 'Vor Ereignis', width: 20 },
+                { key: 'wt',     content: 'Wochentag',    width: 20 },
+                { key: 'del',    content: '',             width: 8  },
               ]}}
-              rows={rules.map((rule, idx) => ({
-                key: rule.name,
-                cells: [
-                  { key: 'ms', content: (
-                    <Stack space="space.050">
-                      <Text>{rule.name}</Text>
-                      <Lozenge appearance={PHASE_APPEARANCE[rule.phase] || 'default'}>
-                        {rule.phase}
-                      </Lozenge>
-                    </Stack>
-                  )},
-                  { key: 'desc', content: RULE_DOCS[rule.name] || '' },
-                  { key: 'abs', content: rule.dependsOn ? (
-                    <Textfield
-                      value={rule.workdaysInput}
-                      onChange={e => updateRule(idx, 'workdaysInput', e.target.value)}
-                    />
-                  ) : (
-                    <Textfield
-                      value={rule.offsetInput}
-                      onChange={e => updateRule(idx, 'offsetInput', e.target.value)}
-                    />
-                  )},
-                  { key: 'wt', content: (
-                    <Select
-                      options={WEEKDAY_OPTIONS}
-                      value={WEEKDAY_OPTIONS.find(o => o.value === rule.adjustStr) || WEEKDAY_OPTIONS[0]}
-                      onChange={opt => updateRule(idx, 'adjustStr', opt?.value ?? 'any')}
-                    />
-                  )},
-                ],
-              }))}
+              rows={rules
+                .map((rule, idx) => ({ rule, idx }))
+                .sort((a, b) => {
+                  const key = r => {
+                    if (r.dependsOn) {
+                      const ref = rules.find(x => x.name === r.dependsOn);
+                      const refOff = ref ? parseInt(ref.offsetInput, 10) : 0;
+                      const wbd    = parseInt(r.workdaysInput, 10);
+                      return (isNaN(refOff) ? 0 : refOff) + (isNaN(wbd) ? -1 : wbd);
+                    }
+                    const off = parseInt(r.offsetInput, 10);
+                    return isNaN(off) ? 0 : off;
+                  };
+                  return key(a.rule) - key(b.rule);
+                })
+                .map(({ rule, idx }) => {
+                  const refOptions = [
+                    { label: 'Go-Live', value: '' },
+                    ...rules.filter(r => r.name && r.name !== rule.name).map(r => ({ label: r.name, value: r.name })),
+                  ];
+                  return {
+                    key: rule._id ? String(rule._id) : rule.name,
+                    cells: [
+                      { key: 'ms', content: rule.userAdded ? (
+                        <Stack space="space.075">
+                          <Textfield
+                            placeholder="Name…"
+                            value={rule.name}
+                            onChange={e => updateRule(idx, 'name', e.target.value)}
+                          />
+                          <Select
+                            options={PHASE_OPTIONS}
+                            value={PHASE_OPTIONS.find(o => o.value === rule.phase) || PHASE_OPTIONS[0]}
+                            onChange={opt => updateRule(idx, 'phase', opt?.value ?? 'Planung')}
+                          />
+                        </Stack>
+                      ) : (
+                        <Stack space="space.050">
+                          <Text>{rule.name}</Text>
+                          <Lozenge appearance={PHASE_APPEARANCE[rule.phase] || 'default'}>
+                            {rule.phase}
+                          </Lozenge>
+                        </Stack>
+                      )},
+                      { key: 'desc', content: rule.userAdded ? (
+                      <Textfield
+                        placeholder="Bedeutung…"
+                        value={rule.description ?? ''}
+                        onChange={e => updateRule(idx, 'description', e.target.value)}
+                      />
+                    ) : (
+                      RULE_DOCS[rule.name] || ''
+                    )},
+                      { key: 'abs', content: rule.dependsOn ? (
+                        <Textfield
+                          value={rule.workdaysInput}
+                          onChange={e => updateRule(idx, 'workdaysInput', e.target.value)}
+                        />
+                      ) : (
+                        <Textfield
+                          value={rule.offsetInput}
+                          onChange={e => updateRule(idx, 'offsetInput', e.target.value)}
+                        />
+                      )},
+                      { key: 'before', content: rule.userAdded ? (
+                        <Select
+                          options={refOptions}
+                          value={refOptions.find(o => o.value === (rule.dependsOn ?? '')) || refOptions[0]}
+                          onChange={opt => updateRule(idx, 'dependsOn', opt?.value || undefined)}
+                        />
+                      ) : (
+                        <Text>{rule.dependsOn ?? 'Go-Live'}</Text>
+                      )},
+                      { key: 'wt', content: (
+                        <Select
+                          options={WEEKDAY_OPTIONS}
+                          value={WEEKDAY_OPTIONS.find(o => o.value === rule.adjustStr) || WEEKDAY_OPTIONS[0]}
+                          onChange={opt => updateRule(idx, 'adjustStr', opt?.value ?? 'any')}
+                        />
+                      )},
+                      { key: 'del', content: (
+                        <Button appearance="subtle" onClick={() => handleDeleteMilestone(idx)}>
+                          Entfernen
+                        </Button>
+                      )},
+                    ],
+                  };
+                })
+              }
             />
+            <Button appearance="subtle" onClick={handleAddMilestone}>
+              + Meilenstein hinzufügen
+            </Button>
           </Stack>
         </Box>
 
@@ -867,7 +950,7 @@ const ReleaseTab = () => {
           <Stack space="space.200">
             <DatePicker
               name="liveDate"
-              label="Liveschaltung wählen (Mi / Do)"
+              label="Go-Live wählen (Mi / Do)"
               defaultValue={DEFAULT_LIVE_DATE}
               onChange={val => { setLiveIso(val); setPlan(null); setError(''); }}
             />
@@ -950,7 +1033,7 @@ const ReleaseTab = () => {
               <Stack space="space.100">
                 <Text>Beta-Woche: {formatDate(betaWeek.start)} – {formatDate(betaWeek.end)}</Text>
                 <Text>Finalisierungs-Woche: {formatDate(finWeek.start)} – {formatDate(finWeek.end)}</Text>
-                <Text>Tag der Liveschaltung: {formatDate(liveEntry.date)}</Text>
+                <Text>Tag des Go-Live: {formatDate(liveEntry.date)}</Text>
               </Stack>
             </SectionMessage>
 
