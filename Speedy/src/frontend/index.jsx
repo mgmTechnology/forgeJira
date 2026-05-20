@@ -72,7 +72,7 @@ const UserTab = () => {
 
   return (
     <>
-      <Heading size="small">{user.displayName}</Heading>
+      <Heading size="medium">{user.displayName}</Heading>
       <MetaTable rows={[
         ['Anzeigename',  user.displayName],
         ['E-Mail',       user.emailAddress || '–'],
@@ -159,7 +159,7 @@ const ProjectTab = () => {
 
       {project && (
         <>
-          <Heading size="small">{project.name} ({project.key})</Heading>
+          <Heading size="medium">{project.name} ({project.key})</Heading>
           <MetaTable rows={[
             ['Name',          project.name],
             ['Schlüssel',     project.key],
@@ -190,7 +190,7 @@ const AnforderungTab = () => {
   const [text, setText] = useState('');
   return (
     <>
-      <Heading size="small">Anforderung erfassen</Heading>
+      <Heading size="medium">Anforderung erfassen</Heading>
       <TextArea
         value={text}
         onChange={e => setText(e.target.value)}
