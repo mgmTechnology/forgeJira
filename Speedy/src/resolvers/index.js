@@ -3,6 +3,16 @@ import api, { route } from '@forge/api';
 
 const resolver = new Resolver();
 
+async function getSiteBase(context) {
+  const raw = context?.localBaseUrl;
+  if (raw) {
+    try { return new URL(raw).origin; } catch { /* fall through */ }
+  }
+  const res  = await api.asUser().requestJira(route`/rest/api/3/serverInfo`, { headers: { Accept: 'application/json' } });
+  const info = await res.json();
+  return info.baseUrl ? new URL(info.baseUrl).origin : '';
+}
+
 /**
  * Gibt die ID des ersten Boards zurück, das dem Projekt zugeordnet ist.
  * Liefert `null` wenn kein Board gefunden oder der Aufruf fehlschlägt.
@@ -242,7 +252,7 @@ resolver.define('createRequirement', async (req) => {
     createdSubtasks.push({ key: subData.key, label: area.label, title: area.title });
   }
 
-  const siteBase = new URL(req.context.localBaseUrl).origin;
+  const siteBase = await getSiteBase(req.context);
   return {
     storyKey: storyData.key,
     storyUrl: `${siteBase}/browse/${storyData.key}`,
@@ -400,7 +410,7 @@ resolver.define('createReleasePlan', async (req) => {
 
   // localBaseUrl ist die echte Jira-Instanz-URL aus dem Forge-Kontext.
   // taskData.self zeigt auf den API-Gateway (api.atlassian.com) und ist nicht browserkompatibel.
-  const siteBase = new URL(req.context.localBaseUrl).origin;
+  const siteBase = await getSiteBase(req.context);
   const result   = {
     epicKey: epicData.key,
     epicUrl: `${siteBase}/browse/${epicData.key}`,
