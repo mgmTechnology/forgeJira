@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Release-Meilensteinplaner</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+    <style>
+        :root {
+            --bg-primary: #f5f0e6;
+            --bg-secondary: #f8f4eb;
+            --text-primary: #333333;
+            --text-secondary: #666666;
+            --accent: #c17f61;
+            --border: #e6e0d6;
+            --btn-primary: #a67a64;
+            --btn-text: #ffffff;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+        .container-fluid { max-width: 1800px; }
+        h1, h2, h3 {
+            color: var(--btn-primary);
+            border-bottom: 2px solid var(--btn-primary);
+            padding-bottom: 10px;
+            margin-top: 1.5em;
+        }
+        .control-panel {
+            background: var(--bg-primary);
+            padding: 2em;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            margin-bottom: 2em;
+        }
+        table { width: 100%; border-collapse: collapse; margin-top: 2rem; }
+        th, td { border: 1px solid var(--border); padding: .6rem .8rem; }
+        th { background: #faf9f7; }
+        .mermaid { background:#fff; border:1px solid var(--border); border-radius:8px; padding:1em; margin-top:2rem; }
+    </style>
+</head>
+<body class="container-fluid py-4">
+
+    <h1>Release-Meilensteinplaner</h1>
+
+    <div class="control-panel">
+        <label for="liveDate" class="form-label fw-semibold">
+            Liveschaltung wählen (Mi / Do):
+        </label>
+        <input type="date" id="liveDate" class="form-control w-auto d-inline-block me-2">
+        <button id="calcBtn" class="btn btn-sm" style="background-color:var(--accent);color:var(--btn-text);">
+            Plan berechnen
+        </button>
+    </div>
+
+    <table id="planTable" class="table table-striped" hidden>
+        <thead>
+            <tr><th>Meilenstein</th><th>Datum</th><th>Phase</th></tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+    
+    <div id="urlaubsplanung" class="mt-5" hidden>
+        <h2>⛔ Urlaubsplanung: Kritische Phasen</h2>
+        <div class="alert alert-danger">
+            <p class="mb-1">In den folgenden Zeiträumen sollte wegen kritischer Release-Phasen <strong>kein Urlaub</strong> geplant werden:</p>
+            <ul id="urlaubsliste" class="mb-0"></ul>
+        </div>
+    </div>
+
+    <div id="timeline" hidden>
+        <h2>📈 Zeitstrahl</h2>
+        <div id="mermaidChart" class="mermaid"></div>
+    </div>
+
+<script>
+/* ---------- Hilfsfunktionen ---------- */
+function addDays(date, diff) {
+    const d = new Date(date);
+    d.setDate(d.getDate() + diff);
+    return d;
+}
+
+function subtractWorkdays(date, days) {
+    let d = new Date(date);
+    let subtractedDays = 0;
+    while (subtractedDays < days) {
+        d.setDate(d.getDate() - 1);
+        if (d.getDay() !== 0 && d.getDay() !== 6) {
+            subtractedDays++;
+        }
+    }
+    return d;
+}
+
+function getWeekRange(date) {
+    const d = new Date(date);
+    const dayOfWeek = d.getDay(); // 0=So, 1=Mo, ...
+    
+    const monday = new Date(d);
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek; // Wenn Sonntag, 6 Tage zurück, sonst zum Montag
+    monday.setDate(d.getDate() + diffToMonday);
+
+    const friday = new Date(monday);
+    friday.setDate(monday.getDate() + 4);
+
+    return { start: monday, end: friday };
+}
+
+function adjustToWeekday(date, target) {
+    const d = new Date(date);
+    while (d.getDay() !== target) d.setDate(d.getDate() - 1);
+    return d;
+}
+function fmt(d) {
+    return d.toLocaleDateString('de-DE',{ weekday:'short', day:'2-digit', month:'2-digit', year:'numeric' });
+}
+function iso(d){ return d.toISOString().substring(0,10); }
+
+/* ---------- Hauptlogik ---------- */
+document.getElementById('calcBtn').addEventListener('click', async () => {
+    const liveVal = document.getElementById('liveDate').value;
+    if (!liveVal) return alert('Bitte ein Go-Live-Datum wählen.');
+
+    const live = new Date(liveVal);
+    if (![3,4].includes(live.getDay())) {
+        alert('Regelverstoß: Liveschaltung muss Mittwoch oder Donnerstag sein.');
+        return;
+    }
+
+    const milestones = [
+        { name:'Kick-off (optional)', phase: 'Planung', offset:-98, adjust:4 },
+        { name:'Erste Einreichung Fachkonzept', phase: 'Planung', offset:-89, adjust:5 },
+        { name:'Letzte Einreichung Fachkonzept', phase: 'Planung', offset:-75, adjust:5 },
+        { name:'Letzte Änderungen Fachkonzept', phase: 'Planung', offset:-55, adjust:5 },
+        { name:'Technische Änderungsdoku fertig', phase: 'Entwicklung', offset:-51, adjust:1 },
+        { name:'Vorbereitung Beta', phase: 'Entwicklung', offset:-49, adjust:null },
+        { name:'Beta-Version bereit', phase: 'Beta & Tests', offset:-48, adjust:4 },
+        { name:'Abschluss Programmierung', phase: 'Entwicklung', offset:-19, adjust:null },
+        { name:'Vorbereitung Finalisierung', phase: 'Entwicklung', dependsOn: 'Finalisierung (Beginn)', workdaysBefore: 3 },
+        { name:'Freigabe an IT (Deadline)', phase: 'Release-Woche', offset:-8, adjust:2 },
+        { name:'Beta-Version (Do 10 Uhr)', phase: 'Beta & Tests', offset:-48, adjust:4 },
+        { name:'Finalisierung (Beginn)', phase: 'Release-Woche', offset:-8, adjust:2 },
+        { name:'Liveschaltung', phase: 'Release-Woche', offset:0, adjust:null },
+    ];
+
+    const calculatedDates = new Map();
+
+    for (const m of milestones) {
+        if (m.offset !== undefined) {
+            let d = addDays(live, m.offset);
+            if (m.adjust !== null) d = adjustToWeekday(d, m.adjust);
+            if ([0, 6].includes(d.getDay())) d = adjustToWeekday(d, 5);
+            calculatedDates.set(m.name, d);
+        }
+    }
+
+    for (const m of milestones) {
+        if (m.dependsOn) {
+            const dependencyDate = calculatedDates.get(m.dependsOn);
+            let d = subtractWorkdays(dependencyDate, m.workdaysBefore);
+            calculatedDates.set(m.name, d);
+        }
+    }
+
+    const rows = milestones.map(m => ({
+        name: m.name,
+        phase: m.phase,
+        date: calculatedDates.get(m.name)
+    })).sort((a, b) => a.date - b.date);
+
+    const tbody = document.querySelector('#planTable tbody');
+    tbody.innerHTML = '';
+    rows.forEach(r=>{
+        const tr=document.createElement('tr');
+        tr.innerHTML=`<td>${r.name}</td><td>${fmt(r.date)}</td><td>${r.phase}</td>`;
+        tbody.appendChild(tr);
+    });
+    document.getElementById('planTable').hidden=false;
+
+    // NEU: Urlaubs-Blackout-Zeiten berechnen und anzeigen
+    const betaDate = rows.find(r => r.name === 'Beta-Version bereit').date;
+    const finalisierungDate = rows.find(r => r.name === 'Finalisierung (Beginn)').date;
+    const liveDateObject = rows.find(r => r.name === 'Liveschaltung').date;
+
+    const betaWeek = getWeekRange(betaDate);
+    const finalisierungsWeek = getWeekRange(finalisierungDate);
+
+    const urlaubsliste = document.getElementById('urlaubsliste');
+    urlaubsliste.innerHTML = `
+        <li><strong>Beta-Woche:</strong> ${fmt(betaWeek.start)} bis ${fmt(betaWeek.end)}</li>
+        <li><strong>Finalisierungs-Woche:</strong> ${fmt(finalisierungsWeek.start)} bis ${fmt(finalisierungsWeek.end)}</li>
+        <li><strong>Tag der Liveschaltung:</strong> ${fmt(liveDateObject)}</li>
+    `;
+    document.getElementById('urlaubsplanung').hidden = false;
+
+    // Mermaid-Code dynamisch bauen
+    const getDate = (name) => iso(rows.find(r => r.name === name).date);
+    const mermaidCode = `
+gantt
+    dateFormat  YYYY-MM-DD
+    title Release-Ablauf (${fmt(liveDateObject)} → Go-Live)
+    
+    section Planung
+    Kick-off (optional)                  :milestone, ${getDate('Kick-off (optional)')}, 0d
+    Erste Einreichung Fachkonzept        :milestone, ${getDate('Erste Einreichung Fachkonzept')}, 0d
+    Letzte Einreichung Fachkonzept       :milestone, ${getDate('Letzte Einreichung Fachkonzept')}, 0d
+    Letzte Änderungen Fachkonzept        :milestone, ${getDate('Letzte Änderungen Fachkonzept')}, 0d
+
+    section Entwicklung & Tests
+    Technische Änderungsdoku fertig      :milestone, ${getDate('Technische Änderungsdoku fertig')}, 0d
+    Vorbereitung Beta                    :milestone, ${getDate('Vorbereitung Beta')}, 0d
+    Beta-Version bereit                  :milestone, m-beta, ${getDate('Beta-Version bereit')}, 0d
+    Abschluss Programmierung             :milestone, ${getDate('Abschluss Programmierung')}, 0d
+    Test-/Abnahmephase                   :active, after m-beta, ${Math.round((rows.find(r=>r.name.startsWith('Freigabe an IT')).date - rows.find(r=>r.name.startsWith('Beta')).date)/(1000*60*60*24))}d
+
+    section Release-Woche
+    Vorbereitung Finalisierung           :milestone, ${getDate('Vorbereitung Finalisierung')}, 0d
+    Freigabe an IT (Deadline)            :milestone, ${getDate('Freigabe an IT (Deadline)')}, 0d
+    Finalisierung (Beginn)               :milestone, ${getDate('Finalisierung (Beginn)')}, 0d
+    Liveschaltung                        :milestone, ${getDate('Liveschaltung')}, 0d
+`;
+    const chartDiv = document.getElementById('mermaidChart');
+    const { svg } = await mermaid.render("ganttChart", mermaidCode);
+    chartDiv.innerHTML = svg;
+    document.getElementById('timeline').hidden = false;
+});
+</script>
+
+<footer class="mt-5 p-4 rounded" style="background: var(--bg-primary); border: 1px solid var(--border);">
+    <h2 class="mb-3">📜 Verbindliche Planungs-Regeln</h2>
+    <div class="table-responsive">
+        <table class="table table-sm table-bordered align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th style="width:25%;">Meilenstein</th>
+                    <th>Regel (Abstand & Logik)</th>
+                    <th style="width:15%;">Fester Wochentag</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Kick-off (optional)</td>
+                    <td>ca. 98 Tage (14 Wochen) vor Go-Live</td>
+                    <td>Donnerstag</td>
+                </tr>
+                <tr>
+                    <td>Erste Fachkonzepte</td>
+                    <td>ca. 89 Tage vor Go-Live</td>
+                    <td>Freitag</td>
+                </tr>
+                <tr>
+                    <td>Letzte Einreichung</td>
+                    <td>ca. 75 Tage vor Go-Live</td>
+                    <td>Freitag</td>
+                </tr>
+                <tr>
+                    <td>Letzte Änderungen</td>
+                    <td>ca. 55 Tage vor Go-Live</td>
+                    <td>Freitag</td>
+                </tr>
+                <tr>
+                    <td>Tech. Änderungsdoku</td>
+                    <td>ca. 51 Tage vor Go-Live (der Montag vor der Beta-Version)</td>
+                    <td>Montag</td>
+                </tr>
+                <tr>
+                    <td>Vorbereitung Beta</td>
+                    <td>1 Werktag vor Beta-Version</td>
+                    <td>(variabel)</td>
+                </tr>
+                <tr>
+                    <td>Beta-Version</td>
+                    <td>ca. 48 Tage vor Go-Live</td>
+                    <td>Donnerstag</td>
+                </tr>
+                <tr>
+                    <td>Abschluss Programmierung</td>
+                    <td>ca. 19 Tage vor Go-Live</td>
+                    <td>(variabel)</td>
+                </tr>
+                 <tr>
+                    <td>Vorbereitung Finalisierung</td>
+                    <td><strong>3 Werktage</strong> vor dem Beginn der Finalisierung</td>
+                    <td>Donnerstag</td>
+                </tr>
+                <tr>
+                    <td>Freigabe an IT (Deadline)</td>
+                    <td>Am selben Tag wie der Beginn der Finalisierung</td>
+                    <td>Dienstag</td>
+                </tr>
+                <tr>
+                    <td>Finalisierung (Beginn)</td>
+                    <td>ca. 8 Tage vor Go-Live</td>
+                    <td>Dienstag</td>
+                </tr>
+                <tr>
+                    <td>Liveschaltung</td>
+                    <td>Tag 0</td>
+                    <td>Mi / Do</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="alert alert-warning mt-4">
+        <h4 class="mb-2">⚠️ Grundregel: Kein Deployment freitags</h4>
+        <p>Es findet <strong>niemals</strong> ein Deployment (Liveschaltung, etc.) an einem Freitag statt, um die IT-Verfügbarkeit für Troubleshooting vor dem Wochenende sicherzustellen.</p>
+    </div>
+</footer>
+
+</body>
+</html>
