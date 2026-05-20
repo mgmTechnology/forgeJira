@@ -14,7 +14,12 @@ resources:
     path: src/frontend/index.jsx
 permissions:
   scopes:
+    - read:board-scope:jira-software
+    - read:project:jira
+    - read:board-scope.admin:jira-software
+    - read:jql:jira
     - read:jira-work
+    - write:jira-work
     - read:jira-user
 
 app:

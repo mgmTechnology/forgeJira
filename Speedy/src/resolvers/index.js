@@ -4,32 +4,325 @@ import api, { route } from '@forge/api';
 const resolver = new Resolver();
 
 /**
- * Liefert die Profildaten des aktuell eingeloggten Nutzers.
- * Wird im Frontend per invoke('getCurrentUser') aufgerufen.
+ * Gibt die ID des ersten Boards zurück, das dem Projekt zugeordnet ist.
+ * Liefert `null` wenn kein Board gefunden oder der Aufruf fehlschlägt.
  *
- * @param {object} req - Forge-Request-Kontext (enthält u.a. accountId des aufrufenden Users)
+ * @param {string} projectKey
+ * @returns {Promise<number|null>}
+ */
+async function findBoardId(projectKey) {
+  try {
+    const res = await api.asUser().requestJira(
+      route`/rest/agile/1.0/board?projectKeyOrId=${projectKey}&maxResults=1`,
+      { headers: { Accept: 'application/json' } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.values?.[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sucht Issues per JQL via POST /rest/api/3/search/jql (das seit Jira Cloud 2024/2025
+ * vorgeschriebene Nachfolger-Endpoint; GET /rest/api/3/search → HTTP 410 Gone).
+ *
+ * @param {string}   jql
+ * @param {string[]} fields
+ * @returns {Promise<object[]>} issues-Array
+ */
+async function searchIssues(jql, fields = ['id', 'issuetype']) {
+  const res = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body:    JSON.stringify({ jql, fields, maxResults: 50 }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Suche fehlgeschlagen: HTTP ${res.status} – ${body}`);
+  }
+  const data = await res.json();
+  return data.issues ?? [];
+}
+
+/**
+ * Liefert die Profildaten des aktuell eingeloggten Nutzers.
+ *
  * @returns {Promise<object>} Jira-Benutzerprofil
  */
 resolver.define('getCurrentUser', async (req) => {
-  console.log('[Speedy Resolver] getCurrentUser aufgerufen, accountId:', req.context?.accountId);
+  console.log('[Speedy] getCurrentUser, accountId:', req.context?.accountId);
 
-  // asUser() stellt den Aufruf im Namen des eingeloggten Nutzers –
-  // nur so liefert /myself die Daten des richtigen Accounts.
   const res = await api.asUser().requestJira(route`/rest/api/3/myself`, {
-    headers: { 'Accept': 'application/json' },
+    headers: { Accept: 'application/json' },
   });
 
-  // Fehlerhafte Antworten (non-2xx) enthalten oft plain-text statt JSON –
-  // daher zuerst als Text lesen, dann loggen und weiterwerfen.
   if (!res.ok) {
     const body = await res.text();
-    console.error(`[Speedy Resolver] /myself schlug fehl: HTTP ${res.status}`, body);
+    console.error(`[Speedy] /myself fehlgeschlagen: HTTP ${res.status}`, body);
     throw new Error(`HTTP ${res.status}: ${body}`);
   }
 
   const data = await res.json();
-  console.log('[Speedy Resolver] Benutzerdaten geladen:', data.displayName, data.accountType);
+  console.log('[Speedy] Benutzerdaten geladen:', data.displayName, data.accountType);
   return data;
+});
+
+/**
+ * Erzeugt eine Atlassian Document Format (ADF) Beschreibung für das Epic.
+ * Enthält die Urlaubssperr-Zeiträume aus der Planungswarnung.
+ *
+ * @param {{ betaStart, betaEnd, finStart, finEnd, liveDate }} vw
+ * @returns {object} ADF-Dokument
+ */
+function buildEpicDescription(vw) {
+  const item = text => ({
+    type: 'listItem',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  });
+  return {
+    type: 'doc', version: 1,
+    content: [
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text: '⛔ Urlaubsplanung: Kritische Phasen', marks: [{ type: 'strong' }] }],
+      },
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text: 'In den folgenden Zeiträumen sollte wegen kritischer Release-Phasen kein Urlaub geplant werden:' }],
+      },
+      {
+        type: 'bulletList',
+        content: [
+          item(`Beta-Woche: ${vw.betaStart} bis ${vw.betaEnd}`),
+          item(`Finalisierungs-Woche: ${vw.finStart} bis ${vw.finEnd}`),
+          item(`Tag der Liveschaltung: ${vw.liveDate}`),
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Legt den berechneten Release-Plan als Jira-Epic mit Kind-Tasks an und erstellt
+ * einen gespeicherten JQL-Filter (Ersatz für Board-Schnellfilter, da die Jira REST API
+ * keine öffentliche Endpoint zum Erstellen von Schnellfiltern bietet).
+ *
+ * Ablauf:
+ *   1. Bestehende Issues mit Label `speedy-{liveIso}` löschen.
+ *   2. Epic anlegen (duedate = Go-Live, description = Urlaubswarnung).
+ *   3. Tasks sequenziell als Kind-Issues anlegen.
+ *   4. Gespeicherten JQL-Filter anlegen (oder bei Fehler ignorieren).
+ *
+ * @param {string}  req.payload.projectKey
+ * @param {string}  req.payload.epicName
+ * @param {string}  req.payload.liveIso           - 'YYYY-MM-DD'
+ * @param {Array}   req.payload.plan              - [{ name, phase, date }]
+ * @param {object}  req.payload.vacationWarning   - { betaStart, betaEnd, finStart, finEnd, liveDate }
+ * @returns {{ epicKey, epicUrl, tasks, filterName?, filterId? }}
+ */
+resolver.define('createReleasePlan', async (req) => {
+  const { projectKey, epicName, liveIso, plan, vacationWarning, blockingDeps = [] } = req.payload;
+  console.log('[Speedy] createReleasePlan:', projectKey, epicName, liveIso, `${plan.length} Meilensteine`);
+
+  const label = `speedy-${liveIso}`;
+
+  // Bestehende Issues löschen (Tasks vor Epic wegen Jira-Hierarchie).
+  const existing = await searchIssues(`project = "${projectKey}" AND labels = "${label}"`);
+  const ordered  = [
+    ...existing.filter(i => i.fields.issuetype.name !== 'Epic'),
+    ...existing.filter(i => i.fields.issuetype.name === 'Epic'),
+  ];
+  for (const iss of ordered) {
+    await api.asUser().requestJira(route`/rest/api/3/issue/${iss.id}`, { method: 'DELETE' });
+    console.log('[Speedy] gelöscht:', iss.id);
+  }
+
+  // Epic anlegen (color darf beim Create nicht gesetzt werden → separater PUT).
+  const epicRes  = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body:    JSON.stringify({ fields: {
+      project:     { key: projectKey },
+      summary:     epicName,
+      issuetype:   { name: 'Epic' },
+      labels:      [label, 'release-plan'],
+      duedate:     liveIso,
+      description: vacationWarning ? buildEpicDescription(vacationWarning) : undefined,
+    }}),
+  });
+  const epicData = await epicRes.json();
+  if (!epicRes.ok) {
+    const msg = epicData.errors ? Object.values(epicData.errors).join(', ') : String(epicRes.status);
+    console.error('[Speedy] Epic-Fehler:', msg, JSON.stringify(epicData));
+    throw new Error(`Epic: ${msg}`);
+  }
+  console.log('[Speedy] Epic angelegt:', epicData.key);
+
+  // Tasks sequenziell anlegen.
+  const createdTasks = [];
+  for (const m of plan) {
+    const taskRes  = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body:    JSON.stringify({ fields: {
+        project:     { key: projectKey },
+        summary:     m.name,
+        issuetype:   { name: 'Task' },
+        parent:      { key: epicData.key },
+        labels:      [label, 'release-plan'],
+        duedate:     m.date,
+        description: {
+          type: 'doc', version: 1,
+          content: [{ type: 'paragraph', content: [{ type: 'text', text: `Phase: ${m.phase}` }] }],
+        },
+      }}),
+    });
+    const taskData = await taskRes.json();
+    if (!taskRes.ok) {
+      const msg = taskData.errors ? Object.values(taskData.errors).join(', ') : String(taskRes.status);
+      console.error('[Speedy] Task-Fehler:', m.name, msg);
+      throw new Error(`Task "${m.name}": ${msg}`);
+    }
+    console.log('[Speedy] Task angelegt:', taskData.key, m.name);
+    createdTasks.push({ key: taskData.key, name: m.name, date: m.date, phase: m.phase });
+  }
+
+  // Issuelinks anlegen: Typ "Blocks" zwischen abhängigen Meilensteinen.
+  // Fehler werden nur gewarnt – bereits erstellte Issues sollen nicht zurückgerollt werden.
+  const keyMap = new Map(createdTasks.map(t => [t.name, t.key]));
+  keyMap.set(epicData.key, epicData.key); // Epic selbst ist kein Meilenstein, aber sicherheitshalber
+  for (const dep of blockingDeps) {
+    const blockerKey = keyMap.get(dep.blocker);
+    const blockedKey = keyMap.get(dep.blocked);
+    if (!blockerKey || !blockedKey) {
+      console.warn(`[Speedy] Issuelink übersprungen (Key nicht gefunden): ${dep.blocker} → ${dep.blocked}`);
+      continue;
+    }
+    const linkRes = await api.asUser().requestJira(route`/rest/api/3/issueLink`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body:    JSON.stringify({
+        type:          { name: 'Blocks' },
+        outwardIssue:  { key: blockerKey },
+        inwardIssue:   { key: blockedKey },
+      }),
+    });
+    if (!linkRes.ok) {
+      const body = await linkRes.text();
+      console.warn(`[Speedy] Issuelink fehlgeschlagen (${dep.blocker} → ${dep.blocked}): ${linkRes.status} ${body}`);
+    } else {
+      console.log(`[Speedy] Issuelink angelegt: ${blockerKey} blocks ${blockedKey}`);
+    }
+  }
+
+  // localBaseUrl ist die echte Jira-Instanz-URL aus dem Forge-Kontext.
+  // taskData.self zeigt auf den API-Gateway (api.atlassian.com) und ist nicht browserkompatibel.
+  const siteBase = req.context.localBaseUrl;
+  const result   = {
+    epicKey: epicData.key,
+    epicUrl: `${siteBase}/browse/${epicData.key}`,
+    tasks:   createdTasks.map(t => ({ ...t, url: `${siteBase}/browse/${t.key}` })),
+  };
+
+  // Quick-Filter auf dem Board anlegen.
+  const qfName = `Speedy: ${epicName}`;
+  const qfJql  = `labels = "${label}"`;
+  try {
+    const boardId = await findBoardId(projectKey);
+    if (boardId) {
+      const qfRes  = await api.asUser().requestJira(route`/rest/agile/1.0/board/${boardId}/quickfilter`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body:    JSON.stringify({ name: qfName, query: qfJql }),
+      });
+      if (qfRes.ok) {
+        const qfData = await qfRes.json();
+        console.log('[Speedy] Quick-Filter angelegt:', qfData.id, qfName);
+        result.quickFilterId   = qfData.id;
+        result.quickFilterName = qfName;
+      } else {
+        const body = await qfRes.text();
+        console.warn('[Speedy] Quick-Filter konnte nicht angelegt werden:', qfRes.status, body);
+      }
+    } else {
+      console.warn('[Speedy] Kein Board für Projekt gefunden, Quick-Filter übersprungen.');
+    }
+  } catch (qfErr) {
+    console.warn('[Speedy] Quick-Filter-Fehler (ignoriert):', qfErr.message);
+  }
+
+  return result;
+});
+
+/**
+ * Löscht den Release-Plan (Epic + alle Kind-Issues) für das angegebene Go-Live-Datum.
+ *
+ * Ablauf:
+ *   1. Epic per Label suchen.
+ *   2. Alle Kind-Issues des Epics per `parent = epicKey` suchen und löschen.
+ *      (DELETE /rest/api/3/issue löscht in Jira nur das Issue selbst, keine Kinder.)
+ *   3. Epic löschen.
+ *
+ * @param {string} req.payload.projectKey
+ * @param {string} req.payload.liveIso
+ * @returns {{ count: number }}
+ */
+resolver.define('deleteReleasePlan', async (req) => {
+  const { projectKey, liveIso } = req.payload;
+  const label = `speedy-${liveIso}`;
+  console.log('[Speedy] deleteReleasePlan:', projectKey, label);
+
+  const epics = await searchIssues(
+    `project = "${projectKey}" AND labels = "${label}" AND issuetype = Epic`,
+    ['id', 'key', 'issuetype']
+  );
+
+  let count = 0;
+  for (const epic of epics) {
+    // Alle Kind-Issues des Epics suchen und zuerst löschen.
+    const children = await searchIssues(`parent = "${epic.key}"`, ['id', 'key']);
+    for (const child of children) {
+      await api.asUser().requestJira(route`/rest/api/3/issue/${child.id}`, { method: 'DELETE' });
+      console.log('[Speedy] Kind gelöscht:', child.id);
+      count++;
+    }
+    // Epic löschen (inkl. etwaiger echter Sub-Tasks).
+    await api.asUser().requestJira(
+      route`/rest/api/3/issue/${epic.id}?deleteSubtasks=true`,
+      { method: 'DELETE' }
+    );
+    console.log('[Speedy] Epic gelöscht:', epic.id);
+    count++;
+  }
+
+  // Quick-Filter auf dem Board entfernen (passend zum Label).
+  try {
+    const boardId = await findBoardId(projectKey);
+    if (boardId) {
+      const listRes = await api.asUser().requestJira(
+        route`/rest/agile/1.0/board/${boardId}/quickfilter`,
+        { headers: { Accept: 'application/json' } }
+      );
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        for (const qf of (listData.values ?? [])) {
+          if (qf.query?.includes(label)) {
+            await api.asUser().requestJira(
+              route`/rest/agile/1.0/board/${boardId}/quickfilter/${qf.id}`,
+              { method: 'DELETE' }
+            );
+            console.log('[Speedy] Quick-Filter gelöscht:', qf.id, qf.name);
+          }
+        }
+      }
+    }
+  } catch (qfErr) {
+    console.warn('[Speedy] Quick-Filter-Löschung fehlgeschlagen (ignoriert):', qfErr.message);
+  }
+
+  return { count };
 });
 
 export const handler = resolver.getDefinitions();

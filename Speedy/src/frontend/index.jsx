@@ -6,7 +6,7 @@ import ForgeReconciler, {
   Stack, Inline, Box,
   Badge, Lozenge, Tag, TagGroup,
   User, SectionMessage,
-  Spinner, Button, Label,
+  Spinner, Button, Label, Link,
   DatePicker, LineChart,
   useProductContext, xcss,
 } from '@forge/react';
@@ -525,6 +525,7 @@ const RULE_DOCS = {
   'Beta-Version':                   'Testversion wird für Beta-Tests freigegeben (Do, 10 Uhr)',
   'Vorbereitung Beta':              'Abschluss aller Vorbereitungsarbeiten vor der Beta-Bereitstellung',
   'Abschluss Programmierung':       'Sämtliche Entwicklungsarbeiten müssen abgeschlossen sein',
+  'Test-/Abnahmephase fertig':      'Alle funktionalen Tests und fachlichen Abnahmen sind erfolgreich abgeschlossen – Freigabe für Finalisierung',
   'Finalisierung (Beginn)':         'Start der Finalisierungsphase – letzte Überprüfungen vor Go-Live',
   'Freigabe an IT':                 'Formelle Softwarefreigabe an IT-Betrieb (selber Tag wie Finalisierung)',
   'Vorbereitung Finalisierung':     'Abschluss aller Entwicklungsarbeiten vor der Finalisierungsphase',
@@ -560,6 +561,7 @@ const MILESTONES = [
   { name: 'Beta-Version',                   phase: 'Beta & Tests',  offset: -48, adjust: 4 },
   { name: 'Vorbereitung Beta',              phase: 'Entwicklung',   dependsOn: 'Beta-Version',           workdaysBefore: 1 },
   { name: 'Abschluss Programmierung',       phase: 'Entwicklung',   offset: -19 },
+  { name: 'Test-/Abnahmephase fertig',      phase: 'Beta & Tests',  dependsOn: 'Finalisierung (Beginn)', workdaysBefore: 1 },
   { name: 'Finalisierung (Beginn)',         phase: 'Release-Woche', offset:  -8, adjust: 2 },
   { name: 'Freigabe an IT',                 phase: 'Release-Woche', offset:  -8, adjust: 2 },
   { name: 'Vorbereitung Finalisierung',     phase: 'Entwicklung',   dependsOn: 'Finalisierung (Beginn)', workdaysBefore: 3 },
@@ -580,6 +582,19 @@ const PHASE_ORDER = {
   'Beta & Tests':  3,
   'Release-Woche': 4,
 };
+
+/**
+ * Fachliche Abhängigkeiten (Blocker → Blocked).
+ * Werden als Jira-Issuelinks (Typ "Blocks") angelegt und im Chart als
+ * horizontale Verbindungslinien bei y = 0.5 dargestellt.
+ */
+const BLOCKING_DEPS = [
+  { blocker: 'Technische Änderungsdoku',   blocked: 'Beta-Version' },
+  { blocker: 'Vorbereitung Finalisierung', blocked: 'Finalisierung (Beginn)' },
+  { blocker: 'Test-/Abnahmephase fertig',  blocked: 'Finalisierung (Beginn)' },
+  { blocker: 'Finalisierung (Beginn)',      blocked: 'Liveschaltung' },
+];
+
 
 /**
  * Erzeugt den initialen Regelwerk-State aus MILESTONES.
@@ -638,11 +653,22 @@ function calculatePlan(live, rules) {
  * @returns {JSX.Element}
  */
 const ReleaseTab = () => {
-  const [liveIso,    setLiveIso]    = useState(DEFAULT_LIVE_DATE);
-  const [rules,      setRules]      = useState(initRules);
-  const [plan,       setPlan]       = useState(null);
-  const [error,      setError]      = useState('');
-  const [showRules,  setShowRules]  = useState(false);
+  const context    = useProductContext();
+  const projectKey = context?.extension?.project?.key ?? null;
+
+  const [liveIso,      setLiveIso]      = useState(DEFAULT_LIVE_DATE);
+  const [rules,        setRules]        = useState(initRules);
+  const [plan,         setPlan]         = useState(null);
+  const [error,        setError]        = useState('');
+  const [showRules,    setShowRules]    = useState(false);
+  const [showRuleDocs, setShowRuleDocs] = useState(false);
+  const [epicName,     setEpicName]     = useState(`Release ${DEFAULT_LIVE_DATE}`);
+  const [creating,     setCreating]     = useState(false);
+  const [createResult, setCreateResult] = useState(null);
+  const [createError,  setCreateError]  = useState('');
+  const [deleting,     setDeleting]     = useState(false);
+  const [deleteResult, setDeleteResult] = useState(null);
+  const [deleteError,  setDeleteError]  = useState('');
 
   const updateRule = (idx, field, value) =>
     setRules(prev => prev.map((r, i) => i === idx ? { ...r, [field]: value } : r));
@@ -656,7 +682,68 @@ const ReleaseTab = () => {
       return;
     }
     setError('');
+    setCreateResult(null);
+    setCreateError('');
+    setDeleteResult(null);
+    setDeleteError('');
+    setEpicName(`Release ${liveIso}`);
+
     setPlan(calculatePlan(live, rules));
+  };
+
+  /** Löscht alle Jira-Issues der aktuellen Planung (Label speedy-{liveIso}). */
+  const handleDeletePlan = async () => {
+    if (!projectKey) return;
+    setDeleting(true);
+    setDeleteError('');
+    setDeleteResult(null);
+    setCreateResult(null);
+    try {
+      const result = await invoke('deleteReleasePlan', { projectKey, liveIso });
+      setDeleteResult(result);
+    } catch (err) {
+      setDeleteError(err.message ?? String(err));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  /**
+   * Legt den berechneten Plan als Jira-Epic mit Kind-Tasks an.
+   * Existierende Issues mit demselben Label (speedy-{liveIso}) werden zuvor gelöscht.
+   * Tasks erhalten Start- und Fälligkeitsdatum = berechnetes Meilenstein-Datum.
+   * Der Epic spannt von Kick-off bis Go-Live.
+   */
+  /**
+   * Delegiert die gesamte Jira-Erstellung an den Backend-Resolver (asUser).
+   * Dates werden als ISO-Strings serialisiert, da Date-Objekte über invoke() nicht übertragen werden.
+   */
+  const handleCreateInJira = async () => {
+    if (!plan || !projectKey) return;
+    setCreating(true);
+    setCreateError('');
+    setCreateResult(null);
+    try {
+      const result = await invoke('createReleasePlan', {
+        projectKey,
+        epicName:  epicName.trim(),
+        liveIso,
+        plan:         plan.map(m => ({ name: m.name, phase: m.phase, date: toLocalISOString(m.date) })),
+        blockingDeps: BLOCKING_DEPS,
+        vacationWarning: betaWeek && finWeek && liveEntry ? {
+          betaStart: formatDate(betaWeek.start),
+          betaEnd:   formatDate(betaWeek.end),
+          finStart:  formatDate(finWeek.start),
+          finEnd:    formatDate(finWeek.end),
+          liveDate:  formatDate(liveEntry.date),
+        } : null,
+      });
+      setCreateResult(result);
+    } catch (err) {
+      setCreateError(err.message ?? String(err));
+    } finally {
+      setCreating(false);
+    }
   };
 
   const liveEntry = plan?.find(m => m.name === 'Liveschaltung');
@@ -667,14 +754,24 @@ const ReleaseTab = () => {
 
   // LineChart als Scatter: colorAccessor="name" → 12 Einzelserien, je 1 Punkt → keine Verbindungslinien.
   // ISO-Datum als x → Victory Charts erkennt temporale Daten und skaliert die x-Achse proportional.
-  // Jeder Meilenstein = zwei Punkte mit gleichem x (Date) und y ∈ {0, 1}.
-  // colorAccessor="name" legt je Meilenstein eine eigene Serie an (12 Serien).
-  // Gleiche x-Koordinate, unterschiedliche y → Victory Charts zeichnet eine senkrechte Linie.
+  // Meilensteine: zwei Punkte mit gleichem x (Date) und y ∈ {0, 1} → senkrechte Linie.
+  // Abhängigkeiten: zwei Punkte mit unterschiedlichem x bei y = 0.5 → waagerechte Verbindung.
   // Date-Objekte statt ISO-Strings erzwingen eine Zeitskala mit proportionalen Abständen.
-  const chartData = plan ? plan.flatMap(m => [
-    { datum: m.date, y: 0, name: m.name },
-    { datum: m.date, y: 1, name: m.name },
-  ]) : [];
+  const chartData = plan ? [
+    ...plan.flatMap(m => [
+      { datum: m.date, y: 0, name: m.name },
+      { datum: m.date, y: 1, name: m.name },
+    ]),
+    ...BLOCKING_DEPS.flatMap((dep, i) => {
+      const from = plan.find(m => m.name === dep.blocker);
+      const to   = plan.find(m => m.name === dep.blocked);
+      if (!from || !to) return [];
+      return [
+        { datum: from.date, y: 0.5, name: `dep_${i}` },
+        { datum: to.date,   y: 0.5, name: `dep_${i}` },
+      ];
+    }),
+  ] : [];
 
   return (
     <Box padding="space.200">
@@ -706,17 +803,22 @@ const ReleaseTab = () => {
           <Stack space="space.200">
             <Inline space="space.300" alignBlock="center">
               <Heading size="small">Regelwerk (editierbar)</Heading>
+              <Button appearance="subtle" onClick={() => setShowRuleDocs(v => !v)}>
+                {showRuleDocs ? 'Erklärung ausblenden' : 'Erklärung anzeigen'}
+              </Button>
               <Button appearance="subtle" onClick={() => setRules(initRules())}>
                 Standardwerte
               </Button>
             </Inline>
-            <SectionMessage appearance="information" title="Erklärung der Felder">
-              <Stack space="space.075">
-                <Text>Tage (Offset): negativer Wert = Kalendertage VOR dem Go-Live (z. B. -98 = 98 Tage früher). 0 = Go-Live-Tag.</Text>
-                <Text>Werktage: negativer Wert = Arbeitstage rückwärts vom genannten Bezugstermin (z. B. -1 vor Beta-Version) – nicht vom Go-Live.</Text>
-                <Text>Wochentag: Das berechnete Datum wird rückwärts auf den nächsten passenden Wochentag verschoben.</Text>
-              </Stack>
-            </SectionMessage>
+            {showRuleDocs && (
+              <SectionMessage appearance="information" title="Erklärung der Felder">
+                <Stack space="space.075">
+                  <Text>Tage (Offset): negativer Wert = Kalendertage VOR dem Go-Live (z. B. -98 = 98 Tage früher). 0 = Go-Live-Tag.</Text>
+                  <Text>Werktage: negativer Wert = Arbeitstage rückwärts vom genannten Bezugstermin (z. B. -1 vor Beta-Version) – nicht vom Go-Live.</Text>
+                  <Text>Wochentag: Das berechnete Datum wird rückwärts auf den nächsten passenden Wochentag verschoben.</Text>
+                </Stack>
+              </SectionMessage>
+            )}
             <DynamicTable
               head={{ cells: [
                 { key: 'ms',   content: 'Meilenstein',            width: 20 },
@@ -851,6 +953,108 @@ const ReleaseTab = () => {
                 <Text>Tag der Liveschaltung: {formatDate(liveEntry.date)}</Text>
               </Stack>
             </SectionMessage>
+
+            {/* Jira-Export */}
+            <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
+              <Stack space="space.200">
+                <Heading size="small">Als Jira-Roadmap anlegen</Heading>
+                <SectionMessage appearance="information" title="Was wird angelegt?">
+                  <Stack space="space.075">
+                    <Text>1 Epic ({epicName || '…'}) mit Start = Kick-off, Fälligkeit = Go-Live.</Text>
+                    <Text>{plan.length} Tasks (je ein Meilenstein) als Kind-Issues des Epics, mit Start- und Fälligkeitsdatum.</Text>
+                    <Text>Label: speedy-{liveIso} · release-plan. Bereits vorhandene Issues mit diesem Label werden überschrieben.</Text>
+                  </Stack>
+                </SectionMessage>
+                <Inline space="space.200" alignBlock="start">
+                  <Stack space="space.100">
+                    <Label labelFor="epic-name">Epic-Name</Label>
+                    <Textfield
+                      id="epic-name"
+                      value={epicName}
+                      onChange={e => setEpicName(e.target.value)}
+                    />
+                  </Stack>
+                </Inline>
+                {createError && (
+                  <SectionMessage appearance="error" title="Fehler beim Anlegen">
+                    <Text>{createError}</Text>
+                  </SectionMessage>
+                )}
+                {createResult && (
+                  <Stack space="space.200">
+                    <SectionMessage appearance="success" title="Erfolgreich terminiert">
+                      <Stack space="space.075">
+                        <Text>Epic <Link href={createResult.epicUrl} openNewWindow>{createResult.epicKey}</Link> mit {createResult.tasks.length} Tasks angelegt.</Text>
+                        {createResult.quickFilterName
+                          ? <Text>Board-Schnellfilter "{createResult.quickFilterName}" angelegt.</Text>
+                          : <Text>Hinweis: Board-Schnellfilter konnte nicht angelegt werden (kein Board gefunden oder fehlende Berechtigung).</Text>
+                        }
+                      </Stack>
+                    </SectionMessage>
+                    <DynamicTable
+                      head={{ cells: [
+                        { key: 'key',   content: 'Ticket',     width: 18 },
+                        { key: 'name',  content: 'Meilenstein' },
+                        { key: 'date',  content: 'Datum',      width: 28 },
+                        { key: 'phase', content: 'Phase',      width: 22 },
+                      ]}}
+                      rows={[
+                        {
+                          key: createResult.epicKey,
+                          cells: [
+                            { key: 'key',   content: <Link href={createResult.epicUrl} openNewWindow><Badge appearance="primary">{createResult.epicKey}</Badge></Link> },
+                            { key: 'name',  content: <Text>{epicName}</Text> },
+                            { key: 'date',  content: <Text>–</Text> },
+                            { key: 'phase', content: <Lozenge appearance="default">Epic</Lozenge> },
+                          ],
+                        },
+                        ...createResult.tasks.map(t => ({
+                          key: t.key,
+                          cells: [
+                            { key: 'key',   content: <Link href={t.url} openNewWindow><Badge>{t.key}</Badge></Link> },
+                            { key: 'name',  content: <Text>{t.name}</Text> },
+                            { key: 'date',  content: <Text>{t.date}</Text> },
+                            { key: 'phase', content: <Lozenge appearance={PHASE_APPEARANCE[t.phase] || 'default'}>{t.phase}</Lozenge> },
+                          ],
+                        })),
+                      ]}
+                    />
+                  </Stack>
+                )}
+                {deleteResult && (
+                  <SectionMessage appearance="success" title="Planung entfernt">
+                    <Text>{deleteResult.count} Issue(s) mit Label speedy-{liveIso} wurden gelöscht.</Text>
+                  </SectionMessage>
+                )}
+                {deleteError && (
+                  <SectionMessage appearance="error" title="Fehler beim Löschen">
+                    <Text>{deleteError}</Text>
+                  </SectionMessage>
+                )}
+                {!projectKey && (
+                  <SectionMessage appearance="warning" title="Kein Projektkontext">
+                    <Text>Die App wurde außerhalb einer Projektseite geöffnet. Bitte öffne sie über ein Jira-Projekt.</Text>
+                  </SectionMessage>
+                )}
+                <Inline space="space.100" alignBlock="center">
+                  <Button
+                    appearance="primary"
+                    onClick={handleCreateInJira}
+                    isDisabled={creating || deleting || !epicName.trim() || !projectKey}
+                  >
+                    {creating ? 'Wird terminiert…' : 'Neu terminieren'}
+                  </Button>
+                  <Button
+                    appearance="danger"
+                    onClick={handleDeletePlan}
+                    isDisabled={creating || deleting || !projectKey}
+                  >
+                    {deleting ? 'Wird entfernt…' : 'Planung entfernen'}
+                  </Button>
+                  {(creating || deleting) && <Spinner size="medium" label="Bitte warten…" />}
+                </Inline>
+              </Stack>
+            </Box>
 
           </Stack>
         )}
