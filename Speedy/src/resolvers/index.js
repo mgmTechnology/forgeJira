@@ -64,18 +64,34 @@ async function searchIssues(jql, fields = ['id', 'issuetype']) {
 resolver.define('getCurrentUser', async (req) => {
   console.log('[Speedy] getCurrentUser, accountId:', req.context?.accountId);
 
-  const res = await api.asUser().requestJira(route`/rest/api/3/myself`, {
-    headers: { Accept: 'application/json' },
-  });
+  const [userRes, permRes] = await Promise.all([
+    api.asUser().requestJira(route`/rest/api/3/myself?expand=groups,applicationRoles`, {
+      headers: { Accept: 'application/json' },
+    }),
+    api.asUser().requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`, {
+      headers: { Accept: 'application/json' },
+    }),
+  ]);
 
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`[Speedy] /myself fehlgeschlagen: HTTP ${res.status}`, body);
-    throw new Error(`HTTP ${res.status}: ${body}`);
+  if (!userRes.ok) {
+    const body = await userRes.text();
+    console.error(`[Speedy] /myself fehlgeschlagen: HTTP ${userRes.status}`, body);
+    throw new Error(`HTTP ${userRes.status}: ${body}`);
   }
 
-  const data = await res.json();
-  console.log('[Speedy] Benutzerdaten geladen:', data.displayName, data.accountType);
+  const data = await userRes.json();
+
+  if (permRes.ok) {
+    const perm = await permRes.json();
+    data.isGlobalAdmin = perm.permissions?.ADMINISTER?.havePermission === true;
+  } else {
+    data.isGlobalAdmin = false;
+  }
+
+  data.applicationRoleNames = (data.applicationRoles?.items ?? []).map(r => r.name);
+  data.groupNames            = (data.groups?.items ?? []).map(g => g.name);
+
+  console.log('[Speedy] Benutzerdaten geladen:', data.displayName, 'isAdmin:', data.isGlobalAdmin);
   return data;
 });
 

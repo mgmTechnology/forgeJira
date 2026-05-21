@@ -227,6 +227,9 @@ const UserTab = () => {
               <Lozenge appearance={user.active ? 'success' : 'removed'}>
                 {user.active ? 'Aktiv' : 'Inaktiv'}
               </Lozenge>
+              <Lozenge appearance={user.isGlobalAdmin ? 'moved' : 'default'}>
+                {user.isGlobalAdmin ? 'Jira Admin' : 'Kein Admin'}
+              </Lozenge>
               <Lozenge appearance="new">{user.accountType}</Lozenge>
               {user.locale && (
                 <Lozenge appearance="default">{user.locale.replace('_', '-')}</Lozenge>
@@ -239,8 +242,11 @@ const UserTab = () => {
           <Stack space="space.200">
             <Heading size="small">Details</Heading>
             <MetaTable rows={[
-              ['Zeitzone', user.timeZone || '–'],
-              ['Konto-ID', maskedId],
+              ['Zeitzone',   user.timeZone || '–'],
+              ['Konto-ID',   maskedId],
+              ['Jira Admin', user.isGlobalAdmin ? 'Ja' : 'Nein'],
+              ['Rollen',     user.applicationRoleNames?.join(', ') || '–'],
+              ['Gruppen',    user.groupNames?.join(', ') || '–'],
             ]} />
           </Stack>
         </Box>
