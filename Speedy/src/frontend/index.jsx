@@ -23,9 +23,14 @@ const cardXcss = xcss({
   boxShadow:    'elevation.shadow.raised',
 });
 
-const codeBlockXcss = xcss({ borderRadius: 'border.radius.100' });
-const userMsgXcss   = xcss({ width: '76%', borderRadius: 'border.radius.200' });
-const aiMsgXcss     = xcss({ width: '88%', borderRadius: 'border.radius.200', boxShadow: 'elevation.shadow.raised' });
+const codeBlockXcss  = xcss({ borderRadius: 'border.radius.100' });
+const userMsgXcss    = xcss({ width: '80%', borderRadius: 'border.radius.200' });
+const aiMsgXcss      = xcss({ width: '94%', borderRadius: 'border.radius.200', boxShadow: 'elevation.shadow.raised' });
+const col50Xcss      = xcss({ width: '50%', minWidth: '0' });
+const col48Xcss      = xcss({ width: '48%', minWidth: '0' });
+const col62Xcss      = xcss({ width: '62%', minWidth: '0' });
+const col36Xcss      = xcss({ width: '36%', minWidth: '0' });
+const composeXcss    = xcss({ borderRadius: 'border.radius.200', boxShadow: 'elevation.shadow.raised' });
 
 
 // ─── Shared Components ───────────────────────────────────────────────────────
@@ -618,6 +623,39 @@ const initAreas = () => ({
   WS:   { checked: false, title: '', desc: '' },
 });
 
+const STORY_SYSTEM_PROMPT = `Du bist ein Assistent zur Strukturierung von Jira-Story-Beschreibungen in einem deutschen Versicherungsunternehmen.
+
+Sichte, präzisiere und strukturiere den eingereichten Text zu einer klaren, sachlichen und gut lesbaren Jira-Story.
+
+Wichtige Regeln:
+- Inhaltlich nichts erfinden, keine fachlichen Annahmen ergänzen
+- Unklare Punkte explizit als offene Punkte markieren
+- Technische Begriffe korrekt übernehmen, Dopplungen bereinigen
+- Verständlich und präzise formulieren, keine KI-Hinweise ausgeben
+
+Verwende genau dieses Format:
+
+# Ziel
+Kurze Beschreibung des eigentlichen Ziels oder Problems.
+
+# Hintergrund
+Fachlicher oder technischer Kontext.
+
+# Anforderungen
+Liste konkreter Anforderungen als Bulletpoints.
+
+# Technische Hinweise
+Optionale technische Details, Frameworks, APIs, Schnittstellen, Einschränkungen.
+
+# Akzeptanzkriterien
+Konkrete, prüfbare Kriterien als Liste.
+
+# Offene Punkte
+Fragen, Risiken oder unklare Informationen.
+
+# Zusatzinformationen
+Sonstige Hinweise oder Randbedingungen.`;
+
 const bereichAccent = {
   VBON: 'color.background.accent.blue.subtlest',
   DOL:  'color.background.accent.teal.subtlest',
@@ -640,6 +678,9 @@ const AnforderungTab = () => {
   const [result,       setResult]       = useState(null);
   const [createError,  setCreateError]  = useState('');
   const [rovoEnabled,  setRovoEnabled]  = useState(false);
+  const [aiLoading,    setAiLoading]    = useState(null);
+  const [aiResult,     setAiResult]     = useState(null);
+  const [aiError,      setAiError]      = useState(null);
 
   useEffect(() => {
     rovo.isEnabled().then(setRovoEnabled).catch(() => setRovoEnabled(false));
@@ -701,6 +742,27 @@ const AnforderungTab = () => {
     }
   };
 
+  const handleAIStructure = (inputText, fieldId) => {
+    if (!inputText.trim()) return;
+    setAiLoading(fieldId);
+    setAiResult(null);
+    setAiError(null);
+    invoke('askAI', {
+      model:    'anthropic/claude-haiku-4-5',
+      messages: [
+        { role: 'system', content: STORY_SYSTEM_PROMPT },
+        { role: 'user',   content: inputText.trim() },
+      ],
+    })
+      .then(res  => setAiResult({ fieldId, content: res.content }))
+      .catch(err => setAiError({ fieldId, message: err?.message ?? String(err) }))
+      .finally(() => setAiLoading(null));
+  };
+
+  const acceptAiResult = (onAccept) => {
+    if (aiResult) { onAccept(aiResult.content); setAiResult(null); }
+  };
+
   const handleReset = () => {
     setResult(null);
     setCreateError('');
@@ -714,6 +776,52 @@ const AnforderungTab = () => {
   const allTitlesValid = checkedAreas.every(b => areas[b.key].title.trim());
   const canCreate      = !!selectedEpic && !!storyTitle.trim() && !!projectKey && allTitlesValid;
 
+  const AiBlock = ({ fieldId, onAccept }) => {
+    if (aiLoading === fieldId) return (
+      <Box backgroundColor="color.background.accent.blue.subtlest" padding="space.400" xcss={roundedXcss}>
+        <Inline space="space.300" alignBlock="center">
+          <Spinner size="large" label="KI strukturiert…" />
+          <Stack space="space.075">
+            <Text weight="bold">KI analysiert deine Beschreibung…</Text>
+            <Text>Claude Haiku strukturiert den Text – einen Moment bitte.</Text>
+          </Stack>
+        </Inline>
+      </Box>
+    );
+    if (aiError?.fieldId === fieldId) return (
+      <Box backgroundColor="color.background.accent.red.subtlest" padding="space.400" xcss={roundedXcss}>
+        <Stack space="space.200">
+          <Inline space="space.100" alignBlock="center">
+            <Lozenge appearance="removed">Fehler</Lozenge>
+            <Text weight="bold">KI-Aufruf fehlgeschlagen</Text>
+          </Inline>
+          <Text>{aiError.message}</Text>
+          <Button appearance="subtle" onClick={() => setAiError(null)}>Schließen</Button>
+        </Stack>
+      </Box>
+    );
+    if (aiResult?.fieldId === fieldId) return (
+      <Box backgroundColor="color.background.accent.green.subtlest" padding="space.400" xcss={roundedXcss}>
+        <Stack space="space.300">
+          <Inline spread="space-between" alignBlock="center">
+            <Inline space="space.150" alignBlock="center">
+              <Lozenge appearance="success">KI-Vorschlag</Lozenge>
+              <Text weight="bold">Strukturierter Entwurf – bitte prüfen</Text>
+            </Inline>
+            <Inline space="space.150">
+              <Button appearance="subtle" onClick={() => setAiResult(null)}>Verwerfen</Button>
+              <Button appearance="primary" onClick={() => acceptAiResult(onAccept)}>Übernehmen ✓</Button>
+            </Inline>
+          </Inline>
+          <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={roundedXcss}>
+            <MarkdownRenderer content={aiResult.content} />
+          </Box>
+        </Stack>
+      </Box>
+    );
+    return null;
+  };
+
   if (!projectKey) {
     return (
       <Box padding="space.200">
@@ -725,52 +833,51 @@ const AnforderungTab = () => {
   }
 
   return (
-    <Box padding="space.200">
-      <Stack space="space.300">
+    <Box padding="space.100">
+      <Stack space="space.250">
 
-        <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
-          <Stack space="space.200">
-            <Inline space="space.200" alignBlock="center">
-              <Heading size="small">Epic auswählen</Heading>
-              <Button
-                appearance="subtle"
-                onClick={() => setEpicsRefresh(v => v + 1)}
-                isDisabled={epicsLoading}
-              >
-                Aktualisieren
-              </Button>
-              {epicsLoading && <Spinner size="small" label="Lade Epics…" />}
-            </Inline>
-            {epicsErr
-              ? <ErrorView message={epicsErr} />
-              : <Select
-                  placeholder={epicsLoading ? 'Lade Epics…' : 'Epic wählen…'}
-                  options={epics.map(e => ({ label: `${e.key} – ${e.summary}`, value: e.key }))}
-                  value={selectedEpic}
-                  onChange={opt => setSelectedEpic(opt)}
+        {/* ── Epic + Titel ─────────────────────────────────────────────── */}
+        <Box backgroundColor="color.background.accent.blue.subtlest" padding="space.400" xcss={cardXcss}>
+          <Inline space="space.400" alignBlock="start">
+            <Box xcss={col50Xcss}>
+              <Stack space="space.150">
+                <Inline space="space.150" alignBlock="center">
+                  <Heading size="small">Epic</Heading>
+                  <Button appearance="subtle" onClick={() => setEpicsRefresh(v => v + 1)} isDisabled={epicsLoading}>↻</Button>
+                  {epicsLoading && <Spinner size="small" label="Lade Epics…" />}
+                </Inline>
+                {epicsErr
+                  ? <ErrorView message={epicsErr} />
+                  : <Select
+                      placeholder={epicsLoading ? 'Lade Epics…' : 'Epic wählen…'}
+                      options={epics.map(e => ({ label: `${e.key} – ${e.summary}`, value: e.key }))}
+                      value={selectedEpic}
+                      onChange={opt => setSelectedEpic(opt)}
+                    />
+                }
+                {!epicsLoading && !epicsErr && epics.length === 0 && <Text>Keine Epics gefunden.</Text>}
+              </Stack>
+            </Box>
+            <Box xcss={col48Xcss}>
+              <Stack space="space.150">
+                <Heading size="small">Titel *</Heading>
+                <Textfield
+                  id="story-title"
+                  value={storyTitle}
+                  onChange={e => setStoryTitle(e.target.value)}
+                  placeholder="Kurze, prägnante Bezeichnung der Anforderung…"
                 />
-            }
-            {!epicsLoading && !epicsErr && epics.length === 0 && (
-              <Text>Keine Epics im Projekt gefunden.</Text>
-            )}
-          </Stack>
+              </Stack>
+            </Box>
+          </Inline>
         </Box>
 
+        {/* ── Story-Beschreibung ───────────────────────────────────────── */}
         <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
-          <Stack space="space.250">
-            <Heading size="small">Story (Anforderung)</Heading>
-            <Stack space="space.100">
-              <Label labelFor="story-title">Titel *</Label>
-              <Textfield
-                id="story-title"
-                value={storyTitle}
-                onChange={e => setStoryTitle(e.target.value)}
-                placeholder="Kurze, prägnante Bezeichnung der Anforderung…"
-              />
-            </Stack>
-            <Stack space="space.100">
-              <Inline space="space.200" alignBlock="center">
-                <Text>Beschreibung</Text>
+          <Stack space="space.300">
+            <Inline spread="space-between" alignBlock="center">
+              <Heading size="medium">Story-Beschreibung</Heading>
+              <Inline space="space.150" alignBlock="center">
                 <Button
                   appearance="subtle"
                   isDisabled={!rovoEnabled}
@@ -786,93 +893,103 @@ const AnforderungTab = () => {
                     } catch { /* ignore */ }
                   }}
                 >
-                  {rovoEnabled ? 'Mit Rovo strukturieren' : 'Rovo nicht verfügbar'}
+                  {rovoEnabled ? 'Rovo' : 'Rovo nicht verfügbar'}
+                </Button>
+                <Button
+                  appearance="primary"
+                  isDisabled={aiLoading === 'storyDesc' || !storyDesc.trim()}
+                  onClick={() => handleAIStructure(storyDesc, 'storyDesc')}
+                >
+                  {aiLoading === 'storyDesc' ? 'KI arbeitet…' : '✨ Mit KI strukturieren'}
                 </Button>
               </Inline>
-              <TextArea
-                id="story-desc"
-                value={storyDesc}
-                onChange={e => setStoryDesc(e.target.value)}
-                placeholder="Stichpunkte, Rohentwurf oder unstrukturierten Text eingeben – Rovo hilft beim Strukturieren…"
-              />
-            </Stack>
+            </Inline>
+            <TextArea
+              id="story-desc"
+              value={storyDesc}
+              onChange={e => setStoryDesc(e.target.value)}
+              placeholder="Stichpunkte, Rohentwurf oder unstrukturierten Text eingeben – die KI strukturiert den Inhalt als saubere Jira-Story…"
+              minimumRows={16}
+            />
+            <AiBlock fieldId="storyDesc" onAccept={setStoryDesc} />
           </Stack>
         </Box>
 
+        {/* ── Betroffene Bereiche ──────────────────────────────────────── */}
         <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
-          <Stack space="space.250">
-            <Stack space="space.050">
-              <Heading size="small">Betroffene Bereiche</Heading>
-              <Text>Pro aktiviertem Bereich wird eine eigenständige Sub-task angelegt – separate Bearbeitung, eigener Status.</Text>
-            </Stack>
-            <Stack space="space.200">
-              {BEREICHE.map(b => (
-                <Stack key={b.key} space="space.075">
-                  <Inline space="space.150" alignBlock="center">
+          <Stack space="space.300">
+            <Inline spread="space-between" alignBlock="center">
+              <Stack space="space.050">
+                <Heading size="medium">Betroffene Bereiche</Heading>
+                <Text>Pro aktiviertem Bereich wird eine eigenständige Sub-task angelegt.</Text>
+              </Stack>
+              <Inline space="space.200">
+                {BEREICHE.map(b => (
+                  <Inline key={b.key} space="space.100" alignBlock="center">
                     <Toggle
                       id={`toggle-${b.key}`}
                       isChecked={areas[b.key].checked}
                       onChange={e => handleAreaToggle(b.key, e.target.checked)}
                       label={b.label}
                     />
-                    <Text>{b.label}</Text>
+                    <Text weight={areas[b.key].checked ? 'bold' : 'regular'}>{b.label}</Text>
                   </Inline>
-                  {areas[b.key].checked && (
-                    <Box
-                      backgroundColor={bereichAccent[b.key]}
-                      padding="space.200"
-                      xcss={roundedXcss}
-                    >
-                      <Stack space="space.150">
-                        <Stack space="space.075">
-                          <Label labelFor={`area-${b.key}`}>Titel Sub-task {b.label} *</Label>
-                          <Textfield
-                            id={`area-${b.key}`}
-                            value={areas[b.key].title}
-                            onChange={e => setAreas(prev => ({
-                              ...prev,
-                              [b.key]: { ...prev[b.key], title: e.target.value },
-                            }))}
-                            placeholder={`Titel der Sub-task für ${b.label}…`}
-                          />
-                        </Stack>
-                        <Stack space="space.075">
-                          <Inline space="space.200" alignBlock="center">
-                            <Text>Beschreibung Sub-task {b.label}</Text>
-                              <Button
-                                appearance="subtle"
-                                isDisabled={!rovoEnabled}
-                                onClick={() => {
-                                  try {
-                                    rovo.open({
-                                      agentKey:  'story-structurer',
-                                      agentName: 'Story Strukturierer',
-                                      prompt: areas[b.key].desc.trim()
-                                        ? `Strukturiere folgende Beschreibung für die Sub-task "${areas[b.key].title || b.label}" (Bereich ${b.label}) als Jira-Story:\n\n${areas[b.key].desc.trim()}`
-                                        : `Ich möchte eine Sub-task für den Bereich ${b.label} beschreiben. Führe mich durch die wichtigsten Punkte.`,
-                                    });
-                                  } catch { /* ignore */ }
-                                }}
-                              >
-                                {rovoEnabled ? 'Mit Rovo strukturieren' : 'Rovo nicht verfügbar'}
-                              </Button>
-                          </Inline>
-                          <TextArea
-                            id={`area-desc-${b.key}`}
-                            value={areas[b.key].desc}
-                            onChange={e => setAreas(prev => ({
-                              ...prev,
-                              [b.key]: { ...prev[b.key], desc: e.target.value },
-                            }))}
-                            placeholder={`Beschreibung oder Stichpunkte für ${b.label}…`}
-                          />
-                        </Stack>
-                      </Stack>
-                    </Box>
-                  )}
+                ))}
+              </Inline>
+            </Inline>
+
+            {BEREICHE.filter(b => areas[b.key].checked).map(b => (
+              <Box key={b.key} backgroundColor={bereichAccent[b.key]} padding="space.400" xcss={roundedXcss}>
+                <Stack space="space.300">
+                  <Inline spread="space-between" alignBlock="center">
+                    <Lozenge appearance="new">{b.label}</Lozenge>
+                    <Inline space="space.150" alignBlock="center">
+                      <Button
+                        appearance="subtle"
+                        isDisabled={!rovoEnabled}
+                        onClick={() => {
+                          try {
+                            rovo.open({
+                              agentKey:  'story-structurer',
+                              agentName: 'Story Strukturierer',
+                              prompt: areas[b.key].desc.trim()
+                                ? `Strukturiere folgende Beschreibung für die Sub-task "${areas[b.key].title || b.label}" (Bereich ${b.label}) als Jira-Story:\n\n${areas[b.key].desc.trim()}`
+                                : `Ich möchte eine Sub-task für den Bereich ${b.label} beschreiben. Führe mich durch die wichtigsten Punkte.`,
+                            });
+                          } catch { /* ignore */ }
+                        }}
+                      >
+                        {rovoEnabled ? 'Rovo' : 'Rovo nicht verfügbar'}
+                      </Button>
+                      <Button
+                        appearance="primary"
+                        isDisabled={aiLoading === `area_${b.key}` || !areas[b.key].desc.trim()}
+                        onClick={() => handleAIStructure(areas[b.key].desc, `area_${b.key}`)}
+                      >
+                        {aiLoading === `area_${b.key}` ? 'KI arbeitet…' : '✨ Mit KI strukturieren'}
+                      </Button>
+                    </Inline>
+                  </Inline>
+                  <Textfield
+                    id={`area-${b.key}`}
+                    value={areas[b.key].title}
+                    onChange={e => setAreas(prev => ({ ...prev, [b.key]: { ...prev[b.key], title: e.target.value } }))}
+                    placeholder={`Titel der Sub-task für ${b.label} *`}
+                  />
+                  <TextArea
+                    id={`area-desc-${b.key}`}
+                    value={areas[b.key].desc}
+                    onChange={e => setAreas(prev => ({ ...prev, [b.key]: { ...prev[b.key], desc: e.target.value } }))}
+                    placeholder={`Beschreibung oder Stichpunkte für ${b.label}…`}
+                    minimumRows={12}
+                  />
+                  <AiBlock
+                    fieldId={`area_${b.key}`}
+                    onAccept={(content) => setAreas(prev => ({ ...prev, [b.key]: { ...prev[b.key], desc: content } }))}
+                  />
                 </Stack>
-              ))}
-            </Stack>
+              </Box>
+            ))}
           </Stack>
         </Box>
 
@@ -895,19 +1012,21 @@ const AnforderungTab = () => {
           </SectionMessage>
         )}
 
-        <Inline space="space.100" alignInline="end">
-          <Button appearance="subtle" onClick={handleReset}>
-            Zurücksetzen
-          </Button>
-          <Button
-            appearance="primary"
-            onClick={handleCreate}
-            isDisabled={!canCreate || creating}
-          >
-            {creating ? 'Wird angelegt…' : 'Anforderung anlegen'}
-          </Button>
-          {creating && <Spinner size="medium" label="Bitte warten…" />}
-        </Inline>
+        <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
+          <Inline spread="space-between" alignBlock="center">
+            <Button appearance="subtle" onClick={handleReset}>Zurücksetzen</Button>
+            <Inline space="space.150" alignBlock="center">
+              {creating && <Spinner size="small" label="Bitte warten…" />}
+              <Button
+                appearance="primary"
+                onClick={handleCreate}
+                isDisabled={!canCreate || creating}
+              >
+                {creating ? 'Wird angelegt…' : 'Anforderung anlegen →'}
+              </Button>
+            </Inline>
+          </Inline>
+        </Box>
 
       </Stack>
     </Box>
@@ -2021,44 +2140,46 @@ const AITab = () => {
   const handleClear = () => { setMessages([]); setError(null); };
 
   return (
-    <Box padding="space.200">
-      <Stack space="space.300">
+    <Box padding="space.100">
+      <Stack space="space.250">
 
+        {/* Modell + System-Prompt in einer Zeile */}
         <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
-          <Stack space="space.150">
-            <Heading size="small">Modell</Heading>
-            <Select
-              options={AI_MODELS}
-              value={selectedModel}
-              onChange={opt => setSelectedModel(opt ?? AI_MODELS[0])}
-            />
-          </Stack>
-        </Box>
-
-        <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
-          <Stack space="space.150">
-            <Inline spread="space-between" alignBlock="center">
-              <Heading size="small">System-Prompt</Heading>
-              <Toggle
-                label="System-Prompt anzeigen"
-                isChecked={showSystem}
-                onChange={() => setShowSystem(v => !v)}
+          <Inline space="space.300" alignBlock="center">
+            <Box xcss={col62Xcss}>
+              <Select
+                options={AI_MODELS}
+                value={selectedModel}
+                onChange={opt => setSelectedModel(opt ?? AI_MODELS[0])}
               />
-            </Inline>
-            {showSystem && (
+            </Box>
+            <Box xcss={col36Xcss}>
+              <Inline spread="space-between" alignBlock="center">
+                <Text>System-Prompt</Text>
+                <Toggle
+                  label="System-Prompt"
+                  isChecked={showSystem}
+                  onChange={() => setShowSystem(v => !v)}
+                />
+              </Inline>
+            </Box>
+          </Inline>
+          {showSystem && (
+            <Box padding="space.200">
               <TextArea
-                placeholder="Optionaler System-Prompt (z. B. Rolle, Sprache, Kontext)…"
+                placeholder="Optionaler System-Prompt (Rolle, Sprache, Kontext)…"
                 value={systemPrompt}
                 onChange={e => setSystemPrompt(e.target.value)}
                 minimumRows={3}
               />
-            )}
-          </Stack>
+            </Box>
+          )}
         </Box>
 
+        {/* Chat-Verlauf */}
         {messages.length > 0 && (
           <Box backgroundColor="color.background.neutral.subtle" padding="space.400" xcss={roundedXcss}>
-            <Stack space="space.300">
+            <Stack space="space.400">
               {messages.map((msg, idx) => (
                 <ChatMessage
                   key={idx}
@@ -2073,25 +2194,30 @@ const AITab = () => {
 
         {error && <ErrorView message={error} />}
 
-        <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
+        {/* Eingabe – visuell als Compose-Bereich */}
+        <Box backgroundColor="color.background.accent.blue.subtlest" padding="space.400" xcss={composeXcss}>
           <Stack space="space.200">
             <TextArea
               placeholder="Deine Frage oder Aufgabe…"
               value={userPrompt}
               onChange={e => setUserPrompt(e.target.value)}
-              minimumRows={4}
+              minimumRows={5}
             />
-            <Inline space="space.100">
-              <Button
-                appearance="primary"
-                onClick={handleSend}
-                isDisabled={loading || !userPrompt.trim() || !selectedModel}
-              >
-                Senden
-              </Button>
-              {messages.length > 0 && !loading && (
-                <Button appearance="subtle" onClick={handleClear}>Neue Konversation</Button>
-              )}
+            <Inline spread="space-between" alignBlock="center">
+              <Text>{selectedModel?.label ?? ''}</Text>
+              <Inline space="space.150">
+                {messages.length > 0 && !loading && (
+                  <Button appearance="subtle" onClick={handleClear}>Neue Konversation</Button>
+                )}
+                {loading && <Spinner size="small" label="Generiere…" />}
+                <Button
+                  appearance="primary"
+                  onClick={handleSend}
+                  isDisabled={loading || !userPrompt.trim() || !selectedModel}
+                >
+                  Senden →
+                </Button>
+              </Inline>
             </Inline>
           </Stack>
         </Box>
