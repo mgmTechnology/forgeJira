@@ -475,11 +475,13 @@ function buildEpicDescription(vw) {
  * @param {object}  req.payload.vacationWarning   - { betaStart, betaEnd, finStart, finEnd, liveDate }
  * @returns {{ epicKey, epicUrl, tasks, filterName?, filterId? }}
  */
+const toLabel = (name) => String(name ?? '').trim().replace(/\s+/g, '-');
+
 resolver.define('createReleasePlan', async (req) => {
   const { projectKey, epicName, liveIso, plan, vacationWarning, blockingDeps = [] } = req.payload;
   console.log('[Speedy] createReleasePlan:', projectKey, epicName, liveIso, `${plan.length} Meilensteine`);
 
-  const label = `speedy-${liveIso}`;
+  const label = toLabel(epicName);
 
   // Bestehende Issues löschen (Tasks vor Epic wegen Jira-Hierarchie).
   const existing = await searchIssues(`project = "${projectKey}" AND labels = "${label}"`);
@@ -524,7 +526,7 @@ resolver.define('createReleasePlan', async (req) => {
         summary:     m.name,
         issuetype:   { name: 'Task' },
         parent:      { key: epicData.key },
-        labels:      [label, 'release-plan'],
+        labels:      [label, 'release-plan', 'Milestone'],
         duedate:     m.date,
         description: {
           type: 'doc', version: 1,
@@ -540,6 +542,57 @@ resolver.define('createReleasePlan', async (req) => {
     }
     console.log('[Speedy] Task angelegt:', taskData.key, m.name);
     createdTasks.push({ key: taskData.key, name: m.name, date: m.date, phase: m.phase });
+  }
+
+  // Urlaubssperr-Issues als Kalendereinträge anlegen.
+  if (vacationWarning?.betaStartIso) {
+    const blocks = [
+      { name: `URLAUBSSPERRE – Beta-Woche (Release ${liveIso})`,          start: vacationWarning.betaStartIso, due: vacationWarning.betaEndIso },
+      { name: `URLAUBSSPERRE – Finalisierungswoche (Release ${liveIso})`, start: vacationWarning.finStartIso,  due: vacationWarning.finEndIso  },
+    ];
+    for (const b of blocks) {
+      const res  = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body:    JSON.stringify({ fields: {
+          project:            { key: projectKey },
+          summary:            b.name,
+          issuetype:          { name: 'Task' },
+          parent:             { key: epicData.key },
+          labels:             [label, 'release-plan', 'Urlaubssperre'],
+          duedate:            b.due,
+          customfield_10015:  b.start,
+          description: {
+            type: 'doc', version: 1,
+            content: [{ type: 'paragraph', content: [{ type: 'text',
+              text: `Kritische Phase: bitte keine Urlaubsplanung (${b.start} – ${b.due})` }] }],
+          },
+        }}),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        console.warn('[Speedy] Urlaubssperre fehlgeschlagen:', b.name, JSON.stringify(data));
+        continue;
+      }
+      console.log('[Speedy] Urlaubssperre angelegt:', data.key, b.name);
+      createdTasks.push({ key: data.key, name: b.name, date: b.due, phase: 'Urlaubssperre' });
+
+      // Startdatum nachträglich per PUT setzen – PUT ist weniger screen-restriktiv als POST.
+      // Fallback: customfield_10015 (klassische Jira-Software-ID für Start Date).
+      for (const startField of ['customfield_10015', 'startDate']) {
+        const upd = await api.asUser().requestJira(route`/rest/api/3/issue/${data.key}`, {
+          method:  'PUT',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body:    JSON.stringify({ fields: { [startField]: b.start } }),
+        });
+        if (upd.status === 204 || upd.status === 200) {
+          console.log('[Speedy] Startdatum gesetzt:', data.key, startField, b.start);
+          break;
+        }
+        const errBody = await upd.text();
+        console.warn('[Speedy] Startdatum fehlgeschlagen:', data.key, startField, upd.status, errBody);
+      }
+    }
   }
 
   // Issuelinks anlegen: Typ "Blocks" zwischen abhängigen Meilensteinen.
@@ -623,31 +676,57 @@ resolver.define('createReleasePlan', async (req) => {
  * @returns {{ count: number }}
  */
 resolver.define('deleteReleasePlan', async (req) => {
-  const { projectKey, liveIso } = req.payload;
-  const label = `speedy-${liveIso}`;
+  const { projectKey, epicName } = req.payload;
+  const label = toLabel(epicName);
   console.log('[Speedy] deleteReleasePlan:', projectKey, label);
 
-  const epics = await searchIssues(
-    `project = "${projectKey}" AND labels = "${label}" AND issuetype = Epic`,
-    ['id', 'key', 'issuetype']
+  // Alle Issues mit dem Label laden.
+  const all = await searchIssues(
+    `project = "${projectKey}" AND labels = "${label}" AND statusCategory != Done`,
+    ['id', 'key', 'issuetype', 'summary']
   );
+  console.log('[Speedy] Auf Done zu setzen:', all.length, '–', all.map(i => i.key).join(', '));
+
+  // Transitions-ID für "Done"-Statuskategorie wird einmal pro Issue ermittelt
+  // und dann genutzt (je nach Workflow kann die ID variieren).
+  const transitionIdCache = new Map(); // issueId → transitionId | null
+
+  const getDoneTransitionId = async (issueId) => {
+    if (transitionIdCache.has(issueId)) return transitionIdCache.get(issueId);
+    const res  = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${issueId}/transitions`,
+      { headers: { Accept: 'application/json' } }
+    );
+    const data = await res.json();
+    const done = (data.transitions ?? []).find(t => t.to?.statusCategory?.key === 'done');
+    const id   = done?.id ?? null;
+    transitionIdCache.set(issueId, id);
+    return id;
+  };
 
   let count = 0;
-  for (const epic of epics) {
-    // Alle Kind-Issues des Epics suchen und zuerst löschen.
-    const children = await searchIssues(`parent = "${epic.key}"`, ['id', 'key']);
-    for (const child of children) {
-      await api.asUser().requestJira(route`/rest/api/3/issue/${child.id}`, { method: 'DELETE' });
-      console.log('[Speedy] Kind gelöscht:', child.id);
-      count++;
+  for (const iss of all) {
+    const transId = await getDoneTransitionId(iss.id);
+    if (!transId) {
+      console.warn('[Speedy] Keine Done-Transition verfügbar:', iss.key);
+      continue;
     }
-    // Epic löschen (inkl. etwaiger echter Sub-Tasks).
-    await api.asUser().requestJira(
-      route`/rest/api/3/issue/${epic.id}?deleteSubtasks=true`,
-      { method: 'DELETE' }
+    const res = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${iss.id}/transitions`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body:    JSON.stringify({ transition: { id: transId } }),
+      }
     );
-    console.log('[Speedy] Epic gelöscht:', epic.id);
-    count++;
+    if (res.status === 204 || res.status === 200) {
+      console.log('[Speedy] Done gesetzt:', iss.key);
+      count++;
+    } else {
+      const body = await res.text();
+      console.error('[Speedy] Transition fehlgeschlagen:', iss.key, res.status, body);
+      throw new Error(`Transition von ${iss.key} fehlgeschlagen: HTTP ${res.status} – ${body}`);
+    }
   }
 
   // Quick-Filter auf dem Board entfernen (passend zum Label).

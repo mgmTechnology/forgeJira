@@ -14,7 +14,9 @@ import { requestJira, requestConfluence, invoke, rovo } from "@forge/bridge";
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
-const roundedXcss = xcss({ borderRadius: 'border.radius.200' });
+const roundedXcss  = xcss({ borderRadius: 'border.radius.200' });
+const col75Xcss    = xcss({ width: '75%', minWidth: '0' });
+const col25Xcss    = xcss({ width: '25%', minWidth: '0' });
 
 const cardXcss = xcss({
   borderRadius: 'border.radius.200',
@@ -1145,10 +1147,11 @@ const MILESTONES = [
 ];
 
 const PHASE_APPEARANCE = {
-  'Planung':       'default',
-  'Entwicklung':   'inprogress',
-  'Beta & Tests':  'new',
-  'Release-Woche': 'removed',
+  'Planung':        'default',
+  'Entwicklung':    'inprogress',
+  'Beta & Tests':   'new',
+  'Release-Woche':  'removed',
+  'Urlaubssperre':  'moved',
 };
 
 // Numerische Phase für Chart-y-Achse (1 = früheste Phase, 4 = Release)
@@ -1224,6 +1227,60 @@ function calculatePlan(live, rules) {
 
 // ─── Tab 4: Release ──────────────────────────────────────────────────────────
 
+const buildMilestoneMarkdown = (plan, getHolidayName, formatDate) => {
+  if (!plan?.length) return '';
+  const header = `| Meilenstein | Datum | Phase |\n|---|---|---|`;
+  const rows = plan.map(m => {
+    const holiday = getHolidayName(m.date);
+    const datum   = holiday ? `${formatDate(m.date)} 🎉 ${holiday}` : formatDate(m.date);
+    return `| ${m.name} | ${datum} | ${m.phase} |`;
+  }).join('\n');
+  return `${header}\n${rows}`;
+};
+
+const icalDate = (d) => {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+};
+
+const icalDayAfter = (d) => {
+  const next = new Date(d);
+  next.setDate(next.getDate() + 1);
+  return icalDate(next);
+};
+
+const buildIcal = (betaWeek, finWeek, liveDate, liveIso) => {
+  const now = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const event = (uid, start, endExcl, summary, desc) =>
+    `BEGIN:VEVENT\r\nUID:${uid}\r\nDTSTAMP:${now}\r\nDTSTART;VALUE=DATE:${start}\r\nDTEND;VALUE=DATE:${endExcl}\r\nSUMMARY:${summary}\r\nDESCRIPTION:${desc}\r\nTRANSP:OPAQUE\r\nEND:VEVENT`;
+
+  const events = [
+    event(
+      `speedy-beta-${liveIso}@speedy`,
+      icalDate(betaWeek.start),
+      icalDayAfter(betaWeek.end),
+      `Beta-Woche – kein Urlaub (Release ${liveIso})`,
+      `Kritische Phase – bitte keine Urlaubsplanung`
+    ),
+    event(
+      `speedy-fin-${liveIso}@speedy`,
+      icalDate(finWeek.start),
+      icalDayAfter(finWeek.end),
+      `Finalisierungs-Woche – kein Urlaub (Release ${liveIso})`,
+      `Kritische Phase – bitte keine Urlaubsplanung`
+    ),
+    event(
+      `speedy-live-${liveIso}@speedy`,
+      icalDate(liveDate),
+      icalDayAfter(liveDate),
+      `Go-Live (Release ${liveIso})`,
+      `Produktions-Deployment`
+    ),
+  ];
+
+  return `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Speedy//Release Planner//DE\r\nCALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\n${events.join('\r\n')}\r\nEND:VCALENDAR`;
+};
+
 /**
  * Release-Meilensteinplaner mit editierbarem Regelwerk, LineChart und NRW-Feiertagen.
  *
@@ -1246,6 +1303,7 @@ const ReleaseTab = () => {
   const [deleting,     setDeleting]     = useState(false);
   const [deleteResult, setDeleteResult] = useState(null);
   const [deleteError,  setDeleteError]  = useState('');
+  const [icalContent,  setIcalContent]  = useState(null);
 
   const updateRule = (idx, field, value) =>
     setRules(prev => prev.map((r, i) => i === idx ? { ...r, [field]: value } : r));
@@ -1288,7 +1346,7 @@ const ReleaseTab = () => {
     setDeleteResult(null);
     setCreateResult(null);
     try {
-      const result = await invoke('deleteReleasePlan', { projectKey, liveIso });
+      const result = await invoke('deleteReleasePlan', { projectKey, epicName: epicName.trim() });
       setDeleteResult(result);
     } catch (err) {
       setDeleteError(err.message ?? String(err));
@@ -1320,11 +1378,15 @@ const ReleaseTab = () => {
         plan:         plan.map(m => ({ name: m.name, phase: m.phase, date: toLocalISOString(m.date) })),
         blockingDeps: BLOCKING_DEPS,
         vacationWarning: betaWeek && finWeek && liveEntry ? {
-          betaStart: formatDate(betaWeek.start),
-          betaEnd:   formatDate(betaWeek.end),
-          finStart:  formatDate(finWeek.start),
-          finEnd:    formatDate(finWeek.end),
-          liveDate:  formatDate(liveEntry.date),
+          betaStart:    formatDate(betaWeek.start),
+          betaEnd:      formatDate(betaWeek.end),
+          finStart:     formatDate(finWeek.start),
+          finEnd:       formatDate(finWeek.end),
+          liveDate:     formatDate(liveEntry.date),
+          betaStartIso: toLocalISOString(betaWeek.start),
+          betaEndIso:   toLocalISOString(betaWeek.end),
+          finStartIso:  toLocalISOString(finWeek.start),
+          finEndIso:    toLocalISOString(finWeek.end),
         } : null,
       });
       setCreateResult(result);
@@ -1346,7 +1408,16 @@ const ReleaseTab = () => {
   // Meilensteine: zwei Punkte mit gleichem x (Date) und y ∈ {0, 1} → senkrechte Linie.
   // Abhängigkeiten: zwei Punkte mit unterschiedlichem x bei y = 0.5 → waagerechte Verbindung.
   // Date-Objekte statt ISO-Strings erzwingen eine Zeitskala mit proportionalen Abständen.
+  // Urlaubssperren zuerst → bekommen die ersten Farben aus colorScale → orange
+  const vacationChartData = betaWeek && finWeek ? [
+    { datum: betaWeek.start, y: 0.75, name: 'Urlaubssperre Beta-Woche' },
+    { datum: betaWeek.end,   y: 0.75, name: 'Urlaubssperre Beta-Woche' },
+    { datum: finWeek.start,  y: 0.75, name: 'Urlaubssperre Fin.-Woche' },
+    { datum: finWeek.end,    y: 0.75, name: 'Urlaubssperre Fin.-Woche' },
+  ] : [];
+
   const chartData = plan ? [
+    ...vacationChartData,
     ...plan.flatMap(m => [
       { datum: m.date, y: 0, name: m.name },
       { datum: m.date, y: 1, name: m.name },
@@ -1564,52 +1635,88 @@ const ReleaseTab = () => {
                 xAccessor="datum"
                 yAccessor="y"
                 colorAccessor="name"
+                colorScale={['#FF8B00', '#FF8B00', ...Array(20).fill(null).map((_, i) =>
+                  ['#0052CC','#36B37E','#6554C0','#00B8D9','#FF5630','#FFAB00','#4C9AFF','#8777D9','#57D9A3','#00C7E6'][i % 10]
+                )]}
                 title="Meilenstein-Timeline"
                 height={260}
               />
             </Box>
 
-            {/* Meilenstein-Tabelle */}
+            {/* Meilenstein-Tabelle + Markdown */}
             <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
               <Stack space="space.200">
                 <Heading size="small">Meilensteine (chronologisch)</Heading>
-                <DynamicTable
-                  head={{ cells: [
-                    { key: 'ms',    content: 'Meilenstein', width: 42 },
-                    { key: 'datum', content: 'Datum',       width: 32 },
-                    { key: 'phase', content: 'Phase' },
-                  ]}}
-                  rows={plan.map(m => {
-                    const holiday = getHolidayName(m.date);
-                    return {
-                      key: m.name,
-                      cells: [
-                        { key: 'ms',    content: m.name },
-                        { key: 'datum', content: holiday
-                          ? `${formatDate(m.date)} 🎉 ${holiday}`
-                          : formatDate(m.date)
-                        },
-                        { key: 'phase', content: (
-                          <Lozenge appearance={PHASE_APPEARANCE[m.phase] || 'default'}>
-                            {m.phase}
-                          </Lozenge>
-                        )},
-                      ],
-                    };
-                  })}
-                />
+                <Inline space="space.300" alignBlock="start">
+                  <Box xcss={col75Xcss}>
+                    <DynamicTable
+                      head={{ cells: [
+                        { key: 'ms',    content: 'Meilenstein', width: 42 },
+                        { key: 'datum', content: 'Datum',       width: 32 },
+                        { key: 'phase', content: 'Phase' },
+                      ]}}
+                      rows={plan.map(m => {
+                        const holiday = getHolidayName(m.date);
+                        return {
+                          key: m.name,
+                          cells: [
+                            { key: 'ms',    content: m.name },
+                            { key: 'datum', content: holiday
+                              ? `${formatDate(m.date)} 🎉 ${holiday}`
+                              : formatDate(m.date)
+                            },
+                            { key: 'phase', content: (
+                              <Lozenge appearance={PHASE_APPEARANCE[m.phase] || 'default'}>
+                                {m.phase}
+                              </Lozenge>
+                            )},
+                          ],
+                        };
+                      })}
+                    />
+                  </Box>
+                  <Box xcss={col25Xcss}>
+                    <Stack space="space.100">
+                      <Heading size="xsmall">Markdown</Heading>
+                      <TextArea
+                        value={buildMilestoneMarkdown(plan, getHolidayName, formatDate)}
+                        isReadOnly
+                        resize="vertical"
+                        minimumRows={18}
+                      />
+                    </Stack>
+                  </Box>
+                </Inline>
               </Stack>
             </Box>
 
             {/* Urlaubssperren */}
             {betaWeek && finWeek && (
-              <SectionMessage appearance="warning" title="Keine Urlaubsplanung in kritischen Phasen">
-                <Stack space="space.100">
-                  <Text>Beta-Woche: {formatDate(betaWeek.start)} – {formatDate(betaWeek.end)}</Text>
-                  <Text>Finalisierungs-Woche: {formatDate(finWeek.start)} – {formatDate(finWeek.end)}</Text>
-                  <Text>Tag des Go-Live: {formatDate(liveEntry.date)}</Text>
+              <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
+                <Stack space="space.200">
+                  <SectionMessage appearance="warning" title="Keine Urlaubsplanung in kritischen Phasen">
+                    <Stack space="space.100">
+                      <Text>Beta-Woche: {formatDate(betaWeek.start)} – {formatDate(betaWeek.end)}</Text>
+                      <Text>Finalisierungs-Woche: {formatDate(finWeek.start)} – {formatDate(finWeek.end)}</Text>
+                      <Text>Tag des Go-Live: {formatDate(liveEntry.date)}</Text>
+                    </Stack>
+                  </SectionMessage>
+                  <Button
+                    appearance="default"
+                    onClick={() => setIcalContent(
+                      icalContent ? null : buildIcal(betaWeek, finWeek, liveEntry.date, liveIso)
+                    )}
+                  >
+                    {icalContent ? 'Kalenderexport schließen' : 'Als Kalendereinträge exportieren (.ics)'}
+                  </Button>
+                  {icalContent && (
+                    <Stack space="space.100">
+                      <Text>Inhalt kopieren → als Datei mit Endung .ics speichern → Doppelklick zum Import in Outlook, Apple Calendar oder Google Calendar:</Text>
+                      <TextArea value={icalContent} isReadOnly resize="vertical" minimumRows={14} />
+                    </Stack>
+                  )}
                 </Stack>
-              </SectionMessage>
+              </Box>
             )}
 
             {/* Jira-Export */}
@@ -1620,7 +1727,7 @@ const ReleaseTab = () => {
                   <Stack space="space.075">
                     <Text>1 Epic ({epicName || '…'}) mit Start = Kick-off, Fälligkeit = Go-Live.</Text>
                     <Text>{plan.length} Tasks (je ein Meilenstein) als Kind-Issues des Epics, mit Start- und Fälligkeitsdatum.</Text>
-                    <Text>Label: speedy-{liveIso} · release-plan. Bereits vorhandene Issues mit diesem Label werden überschrieben.</Text>
+                    <Text>Label: {epicName.trim().replace(/\s+/g, '-')} · release-plan. Bereits vorhandene Issues mit diesem Label werden überschrieben.</Text>
                   </Stack>
                 </SectionMessage>
                 <Inline space="space.200" alignBlock="start">
@@ -1680,8 +1787,8 @@ const ReleaseTab = () => {
                   </Stack>
                 )}
                 {deleteResult && (
-                  <SectionMessage appearance="success" title="Planung entfernt">
-                    <Text>{deleteResult.count} Issue(s) mit Label speedy-{liveIso} wurden gelöscht.</Text>
+                  <SectionMessage appearance="success" title="Planung abgeschlossen">
+                    <Text>{deleteResult.count} Issue(s) mit Label "{epicName.trim().replace(/\s+/g, '-')}" wurden auf Done gesetzt.</Text>
                   </SectionMessage>
                 )}
                 {deleteError && (
@@ -1700,7 +1807,7 @@ const ReleaseTab = () => {
                     onClick={handleCreateInJira}
                     isDisabled={creating || deleting || !epicName.trim() || !projectKey}
                   >
-                    {creating ? 'Wird terminiert…' : 'Neu terminieren'}
+                    {creating ? 'Wird terminiert…' : 'So in Jira anlegen'}
                   </Button>
                   <Button
                     appearance="danger"
