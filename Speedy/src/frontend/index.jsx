@@ -71,6 +71,94 @@ const MetaTable = ({ rows }) => (
   />
 );
 
+// ─── Issue-Hilfsfunktionen & Komponente ─────────────────────────────────────
+
+const PRIORITY_APPEARANCE = {
+  highest: 'removed',
+  high:    'moved',
+  medium:  'new',
+  low:     'default',
+  lowest:  'default',
+};
+
+const priorityAppearance = (name) =>
+  PRIORITY_APPEARANCE[(name ?? '').toLowerCase()] ?? 'default';
+
+const statusAppearance = (category) => {
+  if (category === 'done')          return 'success';
+  if (category === 'indeterminate') return 'inprogress';
+  return 'default';
+};
+
+const fmtIsoDate = (iso) => {
+  if (!iso) return '–';
+  return new Date(iso).toLocaleDateString('de-DE', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+  });
+};
+
+const ISSUE_HEAD = {
+  cells: [
+    { key: 'prio',    content: 'Priorität', width: 9  },
+    { key: 'issue',   content: 'Issue'               },
+    { key: 'type',    content: 'Typ',       width: 10 },
+    { key: 'status',  content: 'Status',    width: 13 },
+    { key: 'project', content: 'Projekt',   width: 8  },
+    { key: 'role',    content: 'Rolle',     width: 10 },
+    { key: 'updated', content: 'Geändert',  width: 10 },
+  ],
+};
+
+const IssueTable = ({ issues, isLoading }) => (
+  <DynamicTable
+    head={ISSUE_HEAD}
+    rows={issues.map(issue => ({
+      key: issue.key,
+      cells: [
+        {
+          key: 'prio',
+          content: (
+            <Lozenge appearance={priorityAppearance(issue.priority)}>
+              {issue.priority}
+            </Lozenge>
+          ),
+        },
+        {
+          key: 'issue',
+          content: (
+            <Stack space="space.050">
+              <Link href={issue.url} openNewWindow>{issue.key}</Link>
+              <Text>{issue.summary}</Text>
+            </Stack>
+          ),
+        },
+        { key: 'type',    content: <Text>{issue.type}</Text> },
+        {
+          key: 'status',
+          content: (
+            <Lozenge appearance={statusAppearance(issue.statusCategory)}>
+              {issue.status}
+            </Lozenge>
+          ),
+        },
+        { key: 'project', content: <Badge>{issue.project}</Badge> },
+        {
+          key: 'role',
+          content: (
+            <Lozenge appearance={issue.isAssigned ? 'inprogress' : 'default'}>
+              {issue.isAssigned ? 'Zugewiesen' : 'Erstellt'}
+            </Lozenge>
+          ),
+        },
+        { key: 'updated', content: <Text>{fmtIsoDate(issue.updated)}</Text> },
+      ],
+    }))}
+    isLoading={isLoading}
+    emptyView={<Text>Keine Issues gefunden.</Text>}
+    rowsPerPage={20}
+  />
+);
+
 // ─── Tab 1: Benutzer ─────────────────────────────────────────────────────────
 
 /**
@@ -80,14 +168,39 @@ const MetaTable = ({ rows }) => (
  * @returns {JSX.Element}
  */
 const UserTab = () => {
-  const [user, setUser]   = useState(null);
-  const [error, setError] = useState(null);
+  const [user,          setUser]          = useState(null);
+  const [error,         setError]         = useState(null);
+  const [issues,        setIssues]        = useState(null);
+  const [loadingIssues, setLoadingIssues] = useState(false);
+  const [issueError,    setIssueError]    = useState(null);
+  const [projectFilter, setProjectFilter] = useState('');
 
   useEffect(() => {
     invoke('getCurrentUser')
       .then(data => data ? setUser(data) : setError('Keine Benutzerdaten erhalten.'))
       .catch(err => setError(err?.message ?? String(err)));
   }, []);
+
+  const handleCheckIssues = () => {
+    setLoadingIssues(true);
+    setIssueError(null);
+    setProjectFilter('');
+    invoke('getMyIssues')
+      .then(data => setIssues(data))
+      .catch(err => setIssueError(err?.message ?? String(err)))
+      .finally(() => setLoadingIssues(false));
+  };
+
+  const projectOptions = issues
+    ? [
+        { label: 'Alle Projekte', value: '' },
+        ...Array.from(new Set(issues.map(i => i.project))).sort().map(p => ({ label: p, value: p })),
+      ]
+    : [];
+
+  const filteredIssues = issues
+    ? (projectFilter ? issues.filter(i => i.project === projectFilter) : issues)
+    : [];
 
   if (error) return <ErrorView message={error} />;
   if (!user)  return <LoadingView label="Lade Benutzerdaten…" />;
@@ -126,6 +239,57 @@ const UserTab = () => {
               ['Zeitzone', user.timeZone || '–'],
               ['Konto-ID', maskedId],
             ]} />
+          </Stack>
+        </Box>
+
+        <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
+          <Stack space="space.300">
+
+            <Inline spread="space-between" alignBlock="center">
+              <Stack space="space.050">
+                <Heading size="small">Meine Issues</Heading>
+                {issues !== null && !loadingIssues && (
+                  <Text>
+                    {projectFilter
+                      ? `${filteredIssues.length} von ${issues.length} Issues`
+                      : `${issues.length} Issue${issues.length !== 1 ? 's' : ''} gefunden`}
+                  </Text>
+                )}
+              </Stack>
+              <Button
+                appearance="primary"
+                onClick={handleCheckIssues}
+                isDisabled={loadingIssues}
+              >
+                {loadingIssues ? 'Lade…' : issues === null ? 'Check Issues' : 'Aktualisieren'}
+              </Button>
+            </Inline>
+
+            {issues !== null && !loadingIssues && projectOptions.length > 2 && (
+              <Select
+                options={projectOptions}
+                value={projectOptions.find(o => o.value === projectFilter) ?? projectOptions[0]}
+                onChange={opt => setProjectFilter(opt?.value ?? '')}
+                placeholder="Nach Projekt filtern…"
+              />
+            )}
+
+            {issueError && (
+              <SectionMessage appearance="error" title="Fehler beim Laden">
+                <Text>{issueError}</Text>
+              </SectionMessage>
+            )}
+
+            {issues === null && !loadingIssues && !issueError && (
+              <Box padding="space.200">
+                <Text>Klick auf "Check Issues" um zugewiesene und erstellte Issues zu laden.</Text>
+              </Box>
+            )}
+
+            {(issues !== null || loadingIssues) && (
+              <IssueTable issues={filteredIssues} isLoading={loadingIssues} />
+            )}
+
           </Stack>
         </Box>
 

@@ -79,6 +79,51 @@ resolver.define('getCurrentUser', async (req) => {
   return data;
 });
 
+resolver.define('getMyIssues', async (req) => {
+  const JQL    = '(assignee = currentUser() OR reporter = currentUser() OR creator = currentUser()) AND statusCategory != Done ORDER BY priority ASC, updated DESC';
+  const FIELDS = ['summary', 'status', 'priority', 'issuetype', 'updated', 'project', 'assignee'];
+  const PAGE   = 100;
+  const LIMIT  = 500;
+
+  let allIssues     = [];
+  let nextPageToken = undefined;
+
+  do {
+    const payload = { jql: JQL, fields: FIELDS, maxResults: PAGE };
+    if (nextPageToken) payload.nextPageToken = nextPageToken;
+
+    const res = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Issues konnten nicht geladen werden: HTTP ${res.status} – ${text}`);
+    }
+    const data    = await res.json();
+    const page    = data.issues ?? [];
+    allIssues     = allIssues.concat(page);
+    nextPageToken = data.nextPageToken;
+    if (page.length < PAGE || !nextPageToken) break;
+  } while (allIssues.length < LIMIT);
+
+  console.log(`[Speedy] getMyIssues: ${allIssues.length} geladen`);
+  const siteBase = await getSiteBase(req.context);
+  return allIssues.map(issue => ({
+    key:            issue.key,
+    url:            `${siteBase}/browse/${issue.key}`,
+    summary:        issue.fields.summary,
+    status:         issue.fields.status?.name               ?? '–',
+    statusCategory: issue.fields.status?.statusCategory?.key ?? '',
+    priority:       issue.fields.priority?.name             ?? '–',
+    type:           issue.fields.issuetype?.name            ?? '–',
+    project:        issue.fields.project?.key               ?? '–',
+    updated:        issue.fields.updated                    ?? null,
+    isAssigned:     issue.fields.assignee?.accountId === req.context.accountId,
+  }));
+});
+
 /**
  * Konvertiert Plain-Text (mit Zeilenumbrüchen) in ein ADF-Dokument.
  *
