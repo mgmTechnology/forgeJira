@@ -23,6 +23,10 @@ const cardXcss = xcss({
   boxShadow:    'elevation.shadow.raised',
 });
 
+const codeBlockXcss = xcss({ borderRadius: 'border.radius.100' });
+const userMsgXcss   = xcss({ width: '76%', borderRadius: 'border.radius.200' });
+const aiMsgXcss     = xcss({ width: '88%', borderRadius: 'border.radius.200', boxShadow: 'elevation.shadow.raised' });
+
 
 // ─── Shared Components ───────────────────────────────────────────────────────
 
@@ -1835,6 +1839,268 @@ const ReleaseTab = () => {
   );
 };
 
+// ─── Tab 5: AI ───────────────────────────────────────────────────────────────
+
+const AI_MODELS = [
+  { label: 'Claude Sonnet 4.5 (Anthropic)',  value: 'anthropic/claude-sonnet-4-5'              },
+  { label: 'Claude Opus 4.7 (Anthropic)',    value: 'anthropic/claude-opus-4-7'                },
+  { label: 'Claude Haiku 4.5 (Anthropic)',   value: 'anthropic/claude-haiku-4-5'               },
+  { label: 'GPT-4o (OpenAI)',                value: 'openai/gpt-4o'                            },
+  { label: 'GPT-4o mini (OpenAI)',           value: 'openai/gpt-4o-mini'                       },
+  { label: 'o3 mini (OpenAI)',               value: 'openai/o3-mini'                           },
+  { label: 'Gemini 2.5 Pro (Google)',        value: 'google/gemini-2.5-pro-preview-06-05'      },
+  { label: 'Gemini 2.0 Flash (Google)',      value: 'google/gemini-2.0-flash-001'              },
+  { label: 'DeepSeek R1 (DeepSeek)',         value: 'deepseek/deepseek-r1'                     },
+  { label: 'DeepSeek V3 (DeepSeek)',         value: 'deepseek/deepseek-chat-v3-0324'           },
+  { label: 'Llama 3.3 70B (Meta)',           value: 'meta-llama/llama-3.3-70b-instruct'        },
+  { label: 'Mistral Large (Mistral)',        value: 'mistralai/mistral-large'                  },
+];
+
+const stripInline = (text) =>
+  String(text ?? '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g,     '$1')
+    .replace(/`(.+?)`/g,       '$1')
+    .replace(/~~(.+?)~~/g,     '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+
+const parseMarkdown = (text) => {
+  const lines  = String(text ?? '').split('\n');
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith('```')) {
+      const code = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('```')) { code.push(lines[i]); i++; }
+      blocks.push({ type: 'code', content: code.join('\n') });
+      i++; continue;
+    }
+    const h1 = line.match(/^# (.+)/);   if (h1) { blocks.push({ type: 'h1', content: h1[1] }); i++; continue; }
+    const h2 = line.match(/^## (.+)/);  if (h2) { blocks.push({ type: 'h2', content: h2[1] }); i++; continue; }
+    const h3 = line.match(/^### (.+)/); if (h3) { blocks.push({ type: 'h3', content: h3[1] }); i++; continue; }
+    if (/^(-{3,}|\*{3,})$/.test(line.trim())) { blocks.push({ type: 'hr' }); i++; continue; }
+    if (/^[-*+] /.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*+] /.test(lines[i])) { items.push(lines[i].replace(/^[-*+] /, '')); i++; }
+      blocks.push({ type: 'ul', items }); continue;
+    }
+    if (/^\d+\. /.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\. /.test(lines[i])) { items.push(lines[i].replace(/^\d+\. /, '')); i++; }
+      blocks.push({ type: 'ol', items }); continue;
+    }
+    if (line.trim() === '') { i++; continue; }
+    const para = [];
+    while (
+      i < lines.length && lines[i].trim() !== '' &&
+      !lines[i].startsWith('#') && !lines[i].startsWith('```') &&
+      !/^[-*+] /.test(lines[i]) && !/^\d+\. /.test(lines[i]) &&
+      !/^(-{3,}|\*{3,})$/.test(lines[i].trim())
+    ) { para.push(lines[i]); i++; }
+    if (para.length) blocks.push({ type: 'p', content: para.join(' ') });
+  }
+  return blocks;
+};
+
+const MarkdownRenderer = ({ content }) => (
+  <Stack space="space.150">
+    {parseMarkdown(content).map((block, idx) => {
+      if (block.type === 'h1') return <Heading key={idx} size="large">{stripInline(block.content)}</Heading>;
+      if (block.type === 'h2') return <Heading key={idx} size="medium">{stripInline(block.content)}</Heading>;
+      if (block.type === 'h3') return <Heading key={idx} size="small">{stripInline(block.content)}</Heading>;
+      if (block.type === 'code') return (
+        <Box key={idx} backgroundColor="color.background.neutral" padding="space.200" xcss={codeBlockXcss}>
+          <Text>{block.content}</Text>
+        </Box>
+      );
+      if (block.type === 'ul') return (
+        <Stack key={idx} space="space.075">
+          {block.items.map((item, j) => (
+            <Inline key={j} space="space.100" alignBlock="start">
+              <Text>•</Text><Text>{stripInline(item)}</Text>
+            </Inline>
+          ))}
+        </Stack>
+      );
+      if (block.type === 'ol') return (
+        <Stack key={idx} space="space.075">
+          {block.items.map((item, j) => (
+            <Inline key={j} space="space.100" alignBlock="start">
+              <Text>{j + 1}.</Text><Text>{stripInline(item)}</Text>
+            </Inline>
+          ))}
+        </Stack>
+      );
+      if (block.type === 'hr') return (
+        <Box key={idx} backgroundColor="color.border.disabled" padding="space.025" xcss={roundedXcss} />
+      );
+      return <Text key={idx}>{stripInline(block.content)}</Text>;
+    })}
+  </Stack>
+);
+
+const ChatMessage = ({ msg, isLoading, modelLabel }) => {
+  if (msg.role === 'user') {
+    return (
+      <Inline spread="space-between" alignBlock="start">
+        <Box xcss={xcss({ width: '22%' })} />
+        <Box backgroundColor="color.background.accent.blue.subtler" padding="space.300" xcss={userMsgXcss}>
+          <Stack space="space.100">
+            <Text weight="bold">Du</Text>
+            <Text>{msg.content}</Text>
+          </Stack>
+        </Box>
+      </Inline>
+    );
+  }
+  const displayModel = modelLabel ?? msg.model?.split('/').pop() ?? 'AI';
+  return (
+    <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={aiMsgXcss}>
+      <Stack space="space.200">
+        <Inline spread="space-between" alignBlock="center">
+          <Inline space="space.100" alignBlock="center">
+            <Lozenge appearance="new">AI</Lozenge>
+            <Text weight="bold">{displayModel}</Text>
+          </Inline>
+          {!isLoading && msg.usage && (
+            <Lozenge appearance="default">
+              {(msg.usage.prompt_tokens ?? 0)} → {(msg.usage.completion_tokens ?? 0)} Token
+            </Lozenge>
+          )}
+        </Inline>
+        {isLoading ? (
+          <Inline space="space.150" alignBlock="center">
+            <Spinner size="small" label="Generiere Antwort…" />
+            <Text>Generiere Antwort…</Text>
+          </Inline>
+        ) : (
+          <MarkdownRenderer content={msg.content} />
+        )}
+      </Stack>
+    </Box>
+  );
+};
+
+const AITab = () => {
+  const [selectedModel, setSelectedModel] = useState(AI_MODELS[0]);
+  const [messages,      setMessages]      = useState([]);
+  const [systemPrompt,  setSystemPrompt]  = useState('');
+  const [showSystem,    setShowSystem]    = useState(false);
+  const [userPrompt,    setUserPrompt]    = useState('');
+  const [loading,       setLoading]       = useState(false);
+  const [error,         setError]         = useState(null);
+
+  const handleSend = () => {
+    if (!userPrompt.trim() || !selectedModel) return;
+
+    const history   = [...messages, { role: 'user', content: userPrompt.trim() }];
+    const apiMsgs   = [];
+    if (systemPrompt.trim()) apiMsgs.push({ role: 'system', content: systemPrompt.trim() });
+    apiMsgs.push(...history.map(m => ({ role: m.role, content: m.content })));
+
+    setMessages([...history, { role: 'assistant', content: '', model: selectedModel.value }]);
+    setUserPrompt('');
+    setLoading(true);
+    setError(null);
+
+    invoke('askAI', { model: selectedModel.value, messages: apiMsgs })
+      .then(res => setMessages(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = { role: 'assistant', content: res.content, model: res.model, usage: res.usage };
+        return updated;
+      }))
+      .catch(err => {
+        setMessages(prev => prev.slice(0, -1));
+        setError(err?.message ?? String(err));
+      })
+      .finally(() => setLoading(false));
+  };
+
+  const handleClear = () => { setMessages([]); setError(null); };
+
+  return (
+    <Box padding="space.200">
+      <Stack space="space.300">
+
+        <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
+          <Stack space="space.150">
+            <Heading size="small">Modell</Heading>
+            <Select
+              options={AI_MODELS}
+              value={selectedModel}
+              onChange={opt => setSelectedModel(opt ?? AI_MODELS[0])}
+            />
+          </Stack>
+        </Box>
+
+        <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
+          <Stack space="space.150">
+            <Inline spread="space-between" alignBlock="center">
+              <Heading size="small">System-Prompt</Heading>
+              <Toggle
+                label="System-Prompt anzeigen"
+                isChecked={showSystem}
+                onChange={() => setShowSystem(v => !v)}
+              />
+            </Inline>
+            {showSystem && (
+              <TextArea
+                placeholder="Optionaler System-Prompt (z. B. Rolle, Sprache, Kontext)…"
+                value={systemPrompt}
+                onChange={e => setSystemPrompt(e.target.value)}
+                minimumRows={3}
+              />
+            )}
+          </Stack>
+        </Box>
+
+        {messages.length > 0 && (
+          <Box backgroundColor="color.background.neutral.subtle" padding="space.400" xcss={roundedXcss}>
+            <Stack space="space.300">
+              {messages.map((msg, idx) => (
+                <ChatMessage
+                  key={idx}
+                  msg={msg}
+                  isLoading={loading && idx === messages.length - 1 && msg.role === 'assistant'}
+                  modelLabel={selectedModel?.label}
+                />
+              ))}
+            </Stack>
+          </Box>
+        )}
+
+        {error && <ErrorView message={error} />}
+
+        <Box backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
+          <Stack space="space.200">
+            <TextArea
+              placeholder="Deine Frage oder Aufgabe…"
+              value={userPrompt}
+              onChange={e => setUserPrompt(e.target.value)}
+              minimumRows={4}
+            />
+            <Inline space="space.100">
+              <Button
+                appearance="primary"
+                onClick={handleSend}
+                isDisabled={loading || !userPrompt.trim() || !selectedModel}
+              >
+                Senden
+              </Button>
+              {messages.length > 0 && !loading && (
+                <Button appearance="subtle" onClick={handleClear}>Neue Konversation</Button>
+              )}
+            </Inline>
+          </Stack>
+        </Box>
+
+      </Stack>
+    </Box>
+  );
+};
+
 // ─── App-Root ────────────────────────────────────────────────────────────────
 
 /**
@@ -1849,11 +2115,13 @@ const App = () => (
       <Tab>Projekt</Tab>
       <Tab>Release</Tab>
       <Tab>Anforderung</Tab>
+      <Tab>AI</Tab>
     </TabList>
     <TabPanel><UserTab /></TabPanel>
     <TabPanel><ProjectTab /></TabPanel>
     <TabPanel><ReleaseTab /></TabPanel>
     <TabPanel><AnforderungTab /></TabPanel>
+    <TabPanel><AITab /></TabPanel>
   </Tabs>
 );
 

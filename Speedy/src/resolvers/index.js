@@ -773,4 +773,33 @@ resolver.define('deleteReleasePlan', async (req) => {
   return { count };
 });
 
+
+resolver.define('askAI', async (req) => {
+  const { model, messages } = req.payload;
+
+  const res = await api.fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'HTTP-Referer':  'https://volkswohl-bund.de',
+      'X-Title':       'Speedy Jira Assistant',
+    },
+    body: JSON.stringify({ model, messages }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`[Speedy] OpenRouter HTTP ${res.status}:`, body);
+    throw new Error(`OpenRouter HTTP ${res.status}: ${body}`);
+  }
+
+  const data = await res.json();
+  return {
+    content: data.choices?.[0]?.message?.content ?? '',
+    model:   data.model ?? model,
+    usage:   data.usage ?? null,
+  };
+});
+
 export const handler = resolver.getDefinitions();

@@ -74,6 +74,10 @@ permissions:
     - read:confluence-content.all
     - read:confluence-space.summary
     - write:confluence-content
+  external:
+    fetch:
+      backend:
+        - 'https://openrouter.ai'
 
 app:
   runtime:

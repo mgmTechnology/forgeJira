@@ -28,6 +28,13 @@ Speedy ist eine [Atlassian Forge](https://developer.atlassian.com/platform/forge
 - **Planung abschließen**: Setzt alle Issues des Release-Plans auf Done (ohne Admin-Rechte)
 - Labels: `{Epic-Name}`, `release-plan`, `Milestone`, `Urlaubssperre`
 
+### Tab 5 – AI
+- Direkter KI-Chat über [OpenRouter](https://openrouter.ai) ohne Jira-Kontext
+- Modellauswahl: Claude Sonnet/Opus, GPT-4o/mini, Gemini 2.0 Flash, Llama 3.3 70B
+- Optionaler System-Prompt (ein-/ausklappbar)
+- Anzeige von genutztem Modell und Token-Verbrauch pro Anfrage
+- Erfordert einen OpenRouter API-Key (siehe [Konfiguration: OpenRouter API-Key](#konfiguration-openrouter-api-key))
+
 ### Rovo Agent – Story Strukturierer
 - Strukturiert unformatierte Story-Beschreibungen zu sauberen Jira-Stories
 - Ausgabeformat: Ziel, Hintergrund, Anforderungen, Technische Hinweise, Akzeptanzkriterien, Offene Punkte, Zusatzinformationen
@@ -175,6 +182,17 @@ forge logs --environment staging   # Logs eines bestimmten Environments
 forge logs --tail                  # Live-Logs streamen (wie tail -f)
 ```
 
+### Umgebungsvariablen
+
+```bash
+forge variables list                              # Alle gesetzten Variablen anzeigen
+forge variables set MY_VAR --encrypt              # Variable verschlüsselt setzen
+forge variables set MY_VAR --encrypt --environment production  # Für bestimmtes Environment
+forge variables delete MY_VAR                     # Variable löschen
+```
+
+> Variablen sind im Resolver über `process.env.MY_VAR` verfügbar. Nie sensible Werte in Code oder `manifest.yml` schreiben.
+
 ### Weitere nützliche Befehle
 
 ```bash
@@ -285,6 +303,45 @@ npx forge install --upgrade
 ```
 
 Der User muss die neuen Berechtigungen im Browser-Dialog bestätigen.
+
+---
+
+## Konfiguration: OpenRouter API-Key
+
+Der AI-Tab sendet Anfragen über [OpenRouter](https://openrouter.ai) an verschiedene KI-Modelle. Dafür wird ein API-Key benötigt.
+
+### 1. API-Key erstellen
+
+1. Account anlegen: [openrouter.ai](https://openrouter.ai)
+2. → **Keys** → **Create Key**
+3. Key kopieren (wird nur einmal angezeigt)
+
+### 2. Key in Forge speichern
+
+```bash
+forge variables set OPENROUTER_API_KEY --encrypt
+# → Eingabeaufforderung erscheint: Key einfügen und Enter
+```
+
+Der Key wird **verschlüsselt** in Atlassians Cloud gespeichert und ist im Resolver als `process.env.OPENROUTER_API_KEY` verfügbar.
+
+> **Wichtig:** Den Key **nicht** in `.env`, `manifest.yml` oder eine andere Datei schreiben — er würde sonst im Git-Repository landen.
+
+### 3. Key prüfen / verwalten
+
+```bash
+forge variables list                          # Zeigt alle gesetzten Variablen
+forge variables set OPENROUTER_API_KEY --encrypt   # Key aktualisieren
+forge variables delete OPENROUTER_API_KEY     # Key löschen
+```
+
+### 4. Pro Environment setzen
+
+Forge-Variablen sind environment-spezifisch. Für Production separat setzen:
+
+```bash
+forge variables set OPENROUTER_API_KEY --encrypt --environment production
+```
 
 ---
 
