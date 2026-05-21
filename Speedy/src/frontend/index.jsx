@@ -10,7 +10,7 @@ import ForgeReconciler, {
   DatePicker, LineChart,
   useProductContext, xcss,
 } from '@forge/react';
-import { requestJira, invoke, rovo } from "@forge/bridge";
+import { requestJira, requestConfluence, invoke, rovo } from "@forge/bridge";
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +20,7 @@ const cardXcss = xcss({
   borderRadius: 'border.radius.200',
   boxShadow:    'elevation.shadow.raised',
 });
+
 
 // ─── Shared Components ───────────────────────────────────────────────────────
 
@@ -298,48 +299,100 @@ const UserTab = () => {
   );
 };
 
+// ─── Confluence-Helpers ──────────────────────────────────────────────────────
+
+const escHtmlFe = (s) =>
+  String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+const buildProtocolHtml = (projectKey, date, activities) => {
+  if (!activities?.length) {
+    return `<p>Keine Aktivitäten am ${date} im Projekt ${escHtmlFe(projectKey)}.</p>`;
+  }
+  const rows = activities.flatMap(issue =>
+    issue.activities.map(act => {
+      const pad  = (n) => String(n).padStart(2, '0');
+      const time = act.time
+        ? (() => { const d = new Date(act.time); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; })()
+        : '–';
+      const detail = act.text ? ` &ndash; <em>${escHtmlFe(act.text)}</em>` : '';
+      return `<tr>
+        <td><a href="${escHtmlFe(issue.url)}">${escHtmlFe(issue.key)}</a></td>
+        <td>${escHtmlFe(issue.summary)}</td>
+        <td>${escHtmlFe(issue.type)}</td>
+        <td>${time}</td>
+        <td>${escHtmlFe(act.author)}</td>
+        <td>${escHtmlFe(act.description)}${detail}</td>
+      </tr>`;
+    })
+  ).join('\n');
+  return `<h2>Aktivitätsprotokoll ${escHtmlFe(projectKey)} &ndash; ${date}</h2>
+<table><tbody>
+<tr><th>Issue</th><th>Zusammenfassung</th><th>Typ</th><th>Zeit</th><th>Person</th><th>Aktivität</th></tr>
+${rows}
+</tbody></table>`;
+};
+
+const buildActivityMarkdown = (projectKey, activities) => {
+  if (!activities?.length) return `Keine Aktivitäten im Projekt ${projectKey}.`;
+  const pad = (n) => String(n).padStart(2, '0');
+  const now  = new Date();
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const header = `## Aktivitätsprotokoll ${projectKey} – ${date}\n\n` +
+    `| Issue | Zusammenfassung | Typ | Zeit | Person | Aktivität |\n` +
+    `|---|---|---|---|---|---|`;
+  const rows = activities.flatMap(issue =>
+    issue.activities.map(act => {
+      const time = act.time
+        ? (() => { const d = new Date(act.time); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; })()
+        : '–';
+      const activity = act.text ? `${act.description} – ${act.text}` : act.description;
+      const safe = (s) => String(s ?? '').replace(/\|/g, '\\|');
+      return `| [${safe(issue.key)}](${safe(issue.url)}) | ${safe(issue.summary)} | ${safe(issue.type)} | ${time} | ${safe(act.author)} | ${safe(activity)} |`;
+    })
+  ).join('\n');
+  return `${header}\n${rows}`;
+};
+
 // ─── Tab 2: Projekt ──────────────────────────────────────────────────────────
 
 const fmtTime = (iso) =>
   iso ? new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
 
+const ACTIVITY_HEAD = {
+  cells: [
+    { key: 'time',        content: 'Zeit',        width: 7  },
+    { key: 'issue',       content: 'Issue',       width: 10 },
+    { key: 'author',      content: 'Person',      width: 14 },
+    { key: 'type',        content: 'Typ',         width: 9  },
+    { key: 'description', content: 'Aktivität',   width: 20 },
+    { key: 'text',        content: 'Text',        width: 40 },
+  ],
+};
+
 const ActivityPanel = ({ items }) => {
-  if (items.length === 0) {
+  if (!items.length) {
     return (
       <SectionMessage appearance="information" title="Keine Aktivitäten heute">
         <Text>Heute wurden in diesem Projekt noch keine Issues bearbeitet.</Text>
       </SectionMessage>
     );
   }
-  return (
-    <Stack space="space.200">
-      {items.map(issue => (
-        <Box key={issue.key} backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
-          <Stack space="space.150">
-            <Inline space="space.150" alignBlock="center">
-              <Link href={issue.url} openNewWindow>{issue.key}</Link>
-              <Text>{issue.summary}</Text>
-              <Lozenge appearance="default">{issue.type}</Lozenge>
-            </Inline>
-            <Box paddingInlineStart="space.200">
-              <Stack space="space.075">
-                {issue.activities.map((act, idx) => (
-                  <Inline key={idx} space="space.150" alignBlock="center" shouldWrap={false}>
-                    <Badge>{fmtTime(act.time)}</Badge>
-                    {act.authorId
-                      ? <User accountId={act.authorId} />
-                      : <Text>{act.author}</Text>}
-                    <Text weight="medium">{act.description}</Text>
-                    {act.text && <Text>· {act.text}</Text>}
-                  </Inline>
-                ))}
-              </Stack>
-            </Box>
-          </Stack>
-        </Box>
-      ))}
-    </Stack>
+
+  const rows = items.flatMap(issue =>
+    issue.activities.map((act, idx) => ({
+      key: `${issue.key}-${idx}`,
+      cells: [
+        { key: 'time',        content: <Badge>{fmtTime(act.time)}</Badge> },
+        { key: 'issue',       content: <Link href={issue.url} openNewWindow>{issue.key}</Link> },
+        { key: 'author',      content: act.authorId ? <User accountId={act.authorId} /> : <Text>{act.author}</Text> },
+        { key: 'type',        content: <Lozenge appearance="default">{issue.type}</Lozenge> },
+        { key: 'description', content: <Text weight="medium">{act.description}</Text> },
+        { key: 'text',        content: act.text ? <Text>{act.text}</Text> : null },
+      ],
+    }))
   );
+
+  return <DynamicTable head={ACTIVITY_HEAD} rows={rows} />;
 };
 
 /**
@@ -388,6 +441,7 @@ const ProjectTab = () => {
       .catch(err => setError(err?.message ?? String(err)));
   }, [selectedKey]);
 
+
   const handleCheckActivities = () => {
     if (!selectedKey) return;
     setLoadingActivities(true);
@@ -397,6 +451,8 @@ const ProjectTab = () => {
       .catch(err => setActivityError(err?.message ?? String(err)))
       .finally(() => setLoadingActivities(false));
   };
+
+
 
   if (error) return <ErrorView message={error} />;
 
@@ -511,11 +567,23 @@ const ProjectTab = () => {
                 {loadingActivities && <LoadingView label="Lade Aktivitäten…" />}
 
                 {activities !== null && !loadingActivities && (
-                  <ActivityPanel items={activities} />
+                  <Stack space="space.400">
+                    <ActivityPanel items={activities} />
+                    <Stack space="space.100">
+                      <Heading size="xsmall">Markdown – für Confluence</Heading>
+                      <TextArea
+                        value={buildActivityMarkdown(selectedKey, activities)}
+                        isReadOnly
+                        resize="vertical"
+                        minimumRows={20}
+                      />
+                    </Stack>
+                  </Stack>
                 )}
 
               </Stack>
             </Box>
+
 
           </Stack>
         )}
