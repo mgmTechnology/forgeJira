@@ -300,6 +300,48 @@ const UserTab = () => {
 
 // ─── Tab 2: Projekt ──────────────────────────────────────────────────────────
 
+const fmtTime = (iso) =>
+  iso ? new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
+
+const ActivityPanel = ({ items }) => {
+  if (items.length === 0) {
+    return (
+      <SectionMessage appearance="information" title="Keine Aktivitäten heute">
+        <Text>Heute wurden in diesem Projekt noch keine Issues bearbeitet.</Text>
+      </SectionMessage>
+    );
+  }
+  return (
+    <Stack space="space.200">
+      {items.map(issue => (
+        <Box key={issue.key} backgroundColor="elevation.surface.raised" padding="space.300" xcss={cardXcss}>
+          <Stack space="space.150">
+            <Inline space="space.150" alignBlock="center">
+              <Link href={issue.url} openNewWindow>{issue.key}</Link>
+              <Text>{issue.summary}</Text>
+              <Lozenge appearance="default">{issue.type}</Lozenge>
+            </Inline>
+            <Box paddingInlineStart="space.200">
+              <Stack space="space.075">
+                {issue.activities.map((act, idx) => (
+                  <Inline key={idx} space="space.150" alignBlock="center" shouldWrap={false}>
+                    <Badge>{fmtTime(act.time)}</Badge>
+                    {act.authorId
+                      ? <User accountId={act.authorId} />
+                      : <Text>{act.author}</Text>}
+                    <Text weight="medium">{act.description}</Text>
+                    {act.text && <Text>· {act.text}</Text>}
+                  </Inline>
+                ))}
+              </Stack>
+            </Box>
+          </Stack>
+        </Box>
+      ))}
+    </Stack>
+  );
+};
+
 /**
  * Zeigt Metadaten des aktuellen Jira-Projekts.
  * Projekt wird automatisch aus dem Seitenkontext ermittelt;
@@ -310,10 +352,13 @@ const UserTab = () => {
 const ProjectTab = () => {
   const context = useProductContext();
 
-  const [project,     setProject]     = useState(null);
-  const [allProjects, setAllProjects] = useState([]);
-  const [selectedKey, setSelectedKey] = useState(null);
-  const [error,       setError]       = useState(null);
+  const [project,            setProject]            = useState(null);
+  const [allProjects,        setAllProjects]        = useState([]);
+  const [selectedKey,        setSelectedKey]        = useState(null);
+  const [error,              setError]              = useState(null);
+  const [activities,         setActivities]         = useState(null);
+  const [loadingActivities,  setLoadingActivities]  = useState(false);
+  const [activityError,      setActivityError]      = useState(null);
 
   const contextKey = context?.extension?.project?.key;
 
@@ -342,6 +387,16 @@ const ProjectTab = () => {
       .then(setProject)
       .catch(err => setError(err?.message ?? String(err)));
   }, [selectedKey]);
+
+  const handleCheckActivities = () => {
+    if (!selectedKey) return;
+    setLoadingActivities(true);
+    setActivityError(null);
+    invoke('getProjectActivity', { projectKey: selectedKey })
+      .then(data => setActivities(data))
+      .catch(err => setActivityError(err?.message ?? String(err)))
+      .finally(() => setLoadingActivities(false));
+  };
 
   if (error) return <ErrorView message={error} />;
 
@@ -419,6 +474,46 @@ const ProjectTab = () => {
                   ['Projektleiter', project.lead?.displayName || '–'],
                   ['URL',           project.url || '–'],
                 ]} />
+              </Stack>
+            </Box>
+
+            <Box backgroundColor="elevation.surface.raised" padding="space.400" xcss={cardXcss}>
+              <Stack space="space.300">
+
+                <Inline spread="space-between" alignBlock="center">
+                  <Stack space="space.050">
+                    <Heading size="small">Heutige Aktivitäten</Heading>
+                    {activities !== null && !loadingActivities && (
+                      <Text>{activities.length} Issue{activities.length !== 1 ? 's' : ''} mit Änderungen</Text>
+                    )}
+                  </Stack>
+                  <Button
+                    appearance="primary"
+                    onClick={handleCheckActivities}
+                    isDisabled={loadingActivities}
+                  >
+                    {loadingActivities ? 'Lade…' : activities === null ? 'Check Activities' : 'Aktualisieren'}
+                  </Button>
+                </Inline>
+
+                {activityError && (
+                  <SectionMessage appearance="error" title="Fehler beim Laden">
+                    <Text>{activityError}</Text>
+                  </SectionMessage>
+                )}
+
+                {activities === null && !loadingActivities && !activityError && (
+                  <Box padding="space.200">
+                    <Text>Klick auf "Check Activities" um heutige Änderungen im Projekt zu sehen.</Text>
+                  </Box>
+                )}
+
+                {loadingActivities && <LoadingView label="Lade Aktivitäten…" />}
+
+                {activities !== null && !loadingActivities && (
+                  <ActivityPanel items={activities} />
+                )}
+
               </Stack>
             </Box>
 

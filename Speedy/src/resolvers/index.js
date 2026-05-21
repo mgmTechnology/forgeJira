@@ -124,6 +124,123 @@ resolver.define('getMyIssues', async (req) => {
   }));
 });
 
+function adfToText(node, max = 320) {
+  const walk = (n) => {
+    if (!n) return '';
+    if (n.type === 'text')     return n.text ?? '';
+    if (n.type === 'hardBreak') return ' ';
+    if (n.type === 'mention')  return n.attrs?.text ? `@${n.attrs.text}` : '';
+    return (n.content ?? []).map(walk).join('');
+  };
+  const text = walk(node).replace(/\s+/g, ' ').trim();
+  return text.length > max ? text.slice(0, max) + '…' : text;
+}
+
+resolver.define('getProjectActivity', async (req) => {
+  const { projectKey } = req.payload;
+  const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+
+  const searchRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body:    JSON.stringify({
+      jql:        `project = "${projectKey}" AND updated >= "${todayStr}" ORDER BY key ASC`,
+      fields:     ['summary', 'issuetype'],
+      maxResults: 100,
+    }),
+  });
+  if (!searchRes.ok) {
+    const text = await searchRes.text();
+    throw new Error(`Suche fehlgeschlagen: HTTP ${searchRes.status} – ${text}`);
+  }
+  const issues = (await searchRes.json()).issues ?? [];
+  console.log(`[Speedy] getProjectActivity: ${issues.length} Issues heute in ${projectKey}`);
+  if (issues.length === 0) return [];
+
+  const siteBase = await getSiteBase(req.context);
+
+  // Changelog + Kommentare parallel laden
+  const settled = await Promise.allSettled(
+    issues.map(issue =>
+      api.asUser().requestJira(
+        route`/rest/api/3/issue/${issue.key}?expand=changelog&fields=summary,issuetype,created,reporter,comment,description`,
+        { headers: { Accept: 'application/json' } }
+      ).then(r => r.json())
+    )
+  );
+
+  const result = [];
+
+  for (let i = 0; i < issues.length; i++) {
+    if (settled[i].status !== 'fulfilled') continue;
+    const detail     = settled[i].value;
+    const issue      = issues[i];
+    const activities = [];
+
+    // Issue heute angelegt?
+    const created = detail.fields?.created ?? '';
+    if (created.startsWith(todayStr)) {
+      activities.push({
+        description: 'Issue angelegt',
+        author:      detail.fields.reporter?.displayName ?? '–',
+        authorId:    detail.fields.reporter?.accountId   ?? null,
+        time:        created,
+      });
+    }
+
+    // Changelog-Einträge von heute
+    for (const h of detail.changelog?.histories ?? []) {
+      if (!h.created?.startsWith(todayStr)) continue;
+      const author   = h.author?.displayName ?? '–';
+      const authorId = h.author?.accountId   ?? null;
+      const time     = h.created;
+      for (const item of h.items ?? []) {
+        let desc;
+        switch (item.field) {
+          case 'status':      desc = `Status: ${item.fromString} → ${item.toString}`;          break;
+          case 'priority':    desc = `Priorität: ${item.fromString} → ${item.toString}`;       break;
+          case 'assignee':    desc = item.toString ? `Zugewiesen an ${item.toString}` : 'Zuweisung entfernt'; break;
+          case 'resolution':  desc = item.toString ? `Geschlossen (${item.toString})` : 'Wieder geöffnet';   break;
+          case 'summary':     desc = 'Titel geändert';       break;
+          case 'description': desc = 'Beschreibung geändert'; break;
+          case 'comment':     continue; // wird über comment.comments erfasst
+          default:            desc = `${item.field} geändert`;
+        }
+        const text = item.field === 'description'
+          ? adfToText(detail.fields?.description)
+          : undefined;
+        activities.push({ description: desc, author, authorId, time, text });
+      }
+    }
+
+    // Kommentare von heute
+    for (const c of detail.fields?.comment?.comments ?? []) {
+      const isNew = c.created?.startsWith(todayStr);
+      const isEdit = !isNew && c.updated?.startsWith(todayStr);
+      if (!isNew && !isEdit) continue;
+      activities.push({
+        description: isNew ? 'Kommentar hinzugefügt' : 'Kommentar bearbeitet',
+        author:      (isNew ? c.author : c.updateAuthor)?.displayName ?? '–',
+        authorId:    (isNew ? c.author : c.updateAuthor)?.accountId   ?? null,
+        time:        isNew ? c.created : c.updated,
+        text:        adfToText(c.body),
+      });
+    }
+
+    if (activities.length === 0) continue;
+    activities.sort((a, b) => a.time.localeCompare(b.time));
+    result.push({
+      key:     issue.key,
+      url:     `${siteBase}/browse/${issue.key}`,
+      summary: detail.fields?.summary ?? issue.fields.summary,
+      type:    detail.fields?.issuetype?.name ?? '–',
+      activities,
+    });
+  }
+
+  return result;
+});
+
 /**
  * Konvertiert Plain-Text (mit Zeilenumbrüchen) in ein ADF-Dokument.
  *
